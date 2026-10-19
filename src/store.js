@@ -31,6 +31,15 @@ import { buildIndex, serializeIndex, deserializeIndex, searchIndex } from './sea
 
 /** Directory holding every entry Markdown file. */
 const MEMORY_DIR = 'memory'
+
+/** Reject anything that is not one plain folder name; fall back to `memory`. */
+function normalizeContentDir(value) {
+  if (typeof value !== 'string') return MEMORY_DIR
+  const dir = value.trim()
+  if (dir === '' || dir === '.' || dir === '..') return MEMORY_DIR
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(dir)) return MEMORY_DIR
+  return dir
+}
 /** Hidden plugin directory (index, journal, quarantine). */
 const INK_DIR = '.inkvault'
 /** Derived index file, relative to the vault root. */
@@ -115,11 +124,12 @@ function compareIds(a, b) {
  */
 export class VaultStore {
   /**
-   * @param {{ root: string, now?: () => Date, clock?: () => number }} options - vault options.
+   * @param {{ root: string, contentDir?: string, now?: () => Date, clock?: () => number }} options - vault options.
    */
-  constructor({ root, now = () => new Date(), clock = () => Date.now() } = {}) {
+  constructor({ root, contentDir = MEMORY_DIR, now = () => new Date(), clock = () => Date.now() } = {}) {
     if (typeof root !== 'string' || root.trim() === '') throw new TypeError('VaultStore requires a root directory')
     this._root = path.resolve(root)
+    this._contentDir = normalizeContentDir(contentDir)
     this._now = typeof now === 'function' ? now : () => new Date()
     this._clock = typeof clock === 'function' ? clock : () => Date.now()
     /** @type {Map<string, { meta: object, body: string, path: string, mtimeMs: number }>} */
@@ -132,6 +142,11 @@ export class VaultStore {
   /** Absolute vault root. */
   get root() {
     return this._root
+  }
+
+  /** Entry folder under the root (`memory` or `notes`). */
+  get contentDir() {
+    return this._contentDir
   }
 
   /**
@@ -170,7 +185,7 @@ export class VaultStore {
 
     let files
     try {
-      files = (await listMarkdown(this._root, MEMORY_DIR)).map(normalizeRelative)
+      files = (await listMarkdown(this._root, this._contentDir)).map(normalizeRelative)
     } catch {
       return null
     }
@@ -206,7 +221,7 @@ export class VaultStore {
 
   /** Create every directory the vault needs. */
   async _ensureLayout() {
-    await ensureDir(path.join(this._root, MEMORY_DIR))
+    await ensureDir(path.join(this._root, this._contentDir))
     await ensureDir(path.join(this._root, INK_DIR))
     await ensureDir(path.join(this._root, INK_DIR, 'quarantine'))
     await ensureDir(path.join(this._root, TRASH_DIR))
@@ -339,8 +354,8 @@ export class VaultStore {
     }
     const relative = normalizeRelative(value.trim())
     const absolute = await safeResolve(this._root, relative)
-    if (!isInside(path.resolve(this._root, MEMORY_DIR), absolute)) {
-      throw new VaultPathError(`entry path must stay inside ${MEMORY_DIR}/: ${value}`)
+    if (!isInside(path.resolve(this._root, this._contentDir), absolute)) {
+      throw new VaultPathError(`entry path must stay inside ${this._contentDir}/: ${value}`)
     }
     return relative
   }
@@ -385,7 +400,7 @@ export class VaultStore {
 
     let relative
     if (source.path === undefined || source.path === null) {
-      relative = `${MEMORY_DIR}/${id}.md`
+      relative = `${this._contentDir}/${id}.md`
     } else {
       relative = await this._memoryRelativePath(source.path)
     }
@@ -445,9 +460,9 @@ export class VaultStore {
     await this._ensureLayout()
     let files = []
     try {
-      files = (await listMarkdown(this._root, MEMORY_DIR)).map(normalizeRelative).sort()
+      files = (await listMarkdown(this._root, this._contentDir)).map(normalizeRelative).sort()
     } catch (error) {
-      console.warn(`[inkvault] failed to list ${MEMORY_DIR}/: ${describeError(error)}`)
+      console.warn(`[inkvault] failed to list ${this._contentDir}/: ${describeError(error)}`)
     }
 
     const entries = new Map()

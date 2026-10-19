@@ -1,7 +1,7 @@
 /**
- * Integration tests for the plugin wiring: fake Cordis context, real store on a
- * temporary vault. These tests exercise the pre-step / session-event /
- * turn-stopping contract and all four tools without a live Host.
+ * Integration tests for the plugin wiring: fake Cordis context, real stores on
+ * temporary folders. Exercises both features (memory + knowledge), their
+ * independent switches, and all tool schemas.
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'
@@ -47,11 +47,27 @@ async function emit(handlers, event, ...args) {
   return results
 }
 
-/** Create a temporary vault root cleaned up after the test. */
+/** Create a temporary workspace with separate memory and knowledge folders. */
 async function temporaryVault(t) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'inkvault-plugin-'))
-  t.after(() => fs.rm(root, { recursive: true, force: true }))
-  return root
+  t.after(() => fs.rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }))
+  return {
+    root,
+    memoryRoot: path.join(root, 'memory-vault'),
+    knowledgeRoot: path.join(root, 'knowledge-vault'),
+  }
+}
+
+/** Install the plugin against a temporary pair of vaults. */
+function installWith(folders, overrides = {}) {
+  const { ctx, handlers, tools } = fakeContext()
+  const runtime = install(ctx, {
+    disabled: false,
+    memoryRoot: folders.memoryRoot,
+    knowledgeRoot: folders.knowledgeRoot,
+    ...overrides,
+  })
+  return { ctx, handlers, tools, runtime }
 }
 
 /** A user content message with the required identity fields. */
@@ -76,30 +92,30 @@ async function emitTurn(handlers, session, turn, userText) {
   })
 }
 
-test('registers exactly the four vault tools', async (t) => {
-  const root = await temporaryVault(t)
-  const { ctx, tools } = fakeContext()
-  const runtime = install(ctx, { disabled: false, memoryRoot: root })
-  await runtime.ensureReady()
+test('registers memory, knowledge and status tools for a fully configured install', async (t) => {
+  const folders = await temporaryVault(t)
+  const { tools } = installWith(folders)
   assert.deepEqual(
     [...tools.keys()].sort(),
-    ['inkvault_forget', 'inkvault_read', 'inkvault_remember', 'inkvault_search'],
+    [
+      'inkvault_forget', 'inkvault_note_read', 'inkvault_note_save', 'inkvault_note_search',
+      'inkvault_read', 'inkvault_remember', 'inkvault_search', 'inkvault_status',
+    ],
   )
 })
 
 test('captures a preference at turn end, then recalls it at the next turn', async (t) => {
-  const root = await temporaryVault(t)
-  const { ctx, handlers } = fakeContext()
-  const runtime = install(ctx, { disabled: false, memoryRoot: root })
-  await runtime.ensureReady()
+  const folders = await temporaryVault(t)
+  const { handlers, runtime } = installWith(folders)
+  await runtime.ensureMemoryReady()
   const session = { id: 'session-1' }
 
   await emitTurn(handlers, session, 1, '我更喜欢用中文回答，请记住这一点。')
   await emit(handlers, 'agent/turn-stopping', { agent: { session }, turn: 1 })
 
-  const memoryFiles = (await fs.readdir(path.join(root, 'memory'))).filter((name) => name.endsWith('.md'))
+  const memoryFiles = (await fs.readdir(path.join(folders.memoryRoot, 'memory'))).filter((name) => name.endsWith('.md'))
   assert.equal(memoryFiles.length, 1, 'one candidate note was written')
-  const note = await fs.readFile(path.join(root, 'memory', memoryFiles[0]), 'utf8')
+  const note = await fs.readFile(path.join(folders.memoryRoot, 'memory', memoryFiles[0]), 'utf8')
   assert.match(note, /^---\n/)
   assert.match(note, /status: pending/)
   assert.match(note, /kind: preference/)
@@ -120,9 +136,8 @@ test('captures a preference at turn end, then recalls it at the next turn', asyn
 })
 
 test('recalls at most once per turn and only at step 0', async (t) => {
-  const root = await temporaryVault(t)
-  const { ctx, handlers } = fakeContext()
-  const runtime = install(ctx, { disabled: false, memoryRoot: root })
+  const folders = await temporaryVault(t)
+  const { handlers, runtime } = installWith(folders)
   await runtime.remember({ body: '用户偏好：回答保持简洁。', kind: 'preference', tags: ['preference'], confidence: 0.9, origin: '' })
 
   const session = { id: 'session-2' }
@@ -136,35 +151,97 @@ test('recalls at most once per turn and only at step 0', async (t) => {
   assert.equal(third.messages.length, 2, 'a new turn injects again')
 })
 
-test('disabled: true keeps tools but performs no recall or capture', async (t) => {
-  const root = await temporaryVault(t)
-  const { ctx, handlers, tools } = fakeContext()
-  const runtime = install(ctx, { disabled: true, memoryRoot: root })
-  assert.equal(tools.size, 4)
+test('knowledge notes land in the chosen folder and round-trip through the tools', async (t) => {
+  const folders = await temporaryVault(t)
+  const { tools } = installWith(folders)
+  const exec = { agent: { session: { id: 'knowledge-session' } } }
 
+  const saved = await tools.get('inkvault_note_save').execute(
+    { text: 'Obsidian 的双链用 [[笔记名]] 表示。', kind: 'reference', tags: ['obsidian'] },
+    exec,
+  )
+  const notePath = path.join(folders.knowledgeRoot, 'notes', `${saved.id}.md`)
+  const onDisk = await fs.readFile(notePath, 'utf8')
+  assert.match(onDisk, /Obsidian 的双链/)
+  assert.match(onDisk, /source: manual/)
+
+  const found = await tools.get('inkvault_note_search').execute({ query: '双链 Obsidian' }, exec)
+  assert.ok(found.results.some((entry) => entry.id === saved.id))
+
+  const read = await tools.get('inkvault_note_read').execute({ id: saved.id }, exec)
+  assert.match(read.body, /双链/)
+  assert.equal(read.path, `notes/${saved.id}.md`)
+
+  // The memory vault is a different folder and stayed untouched by knowledge writes.
+  assert.deepEqual(await fs.readdir(path.join(folders.memoryRoot, 'memory')), [])
+})
+
+test('feature switches are independent: memory off keeps knowledge tools only', async (t) => {
+  const folders = await temporaryVault(t)
+  const { tools, handlers } = installWith(folders, { memoryEnabled: false })
+  assert.deepEqual(
+    [...tools.keys()].sort(),
+    ['inkvault_note_read', 'inkvault_note_save', 'inkvault_note_search', 'inkvault_status'],
+  )
   const session = { id: 'session-3' }
   await emitTurn(handlers, session, 1, '我更喜欢用中文回答。')
   await emit(handlers, 'agent/turn-stopping', { agent: { session }, turn: 1 })
-  await assert.rejects(fs.readdir(path.join(root, 'memory')))
-
-  const messages = [userMessage('u1', '中文回答')]
-  const [decision] = await emit(
-    handlers,
-    'agent/pre-step',
-    { agent: { session }, messages, turn: 2, step: 0 },
-    async () => ({ kind: 'enter', messages }),
-  )
-  assert.equal(decision.messages.length, 1)
-  // Explicit tools still work while automatic behavior is off.
-  const remembered = await tools.get('inkvault_remember').execute({ text: '用户的时区是 Asia/Shanghai' }, { agent: { session } })
-  assert.match(remembered.id, /^m-\d{8}-[a-z0-9]{6}$/)
-  await runtime.ensureReady()
+  await assert.rejects(fs.readdir(path.join(folders.memoryRoot, 'memory')))
 })
 
-test('tools round-trip: remember, search, read, forget', async (t) => {
-  const root = await temporaryVault(t)
+test('feature switches are independent: knowledge off keeps memory tools only', async (t) => {
+  const folders = await temporaryVault(t)
+  const { tools } = installWith(folders, { knowledgeEnabled: false })
+  assert.deepEqual(
+    [...tools.keys()].sort(),
+    ['inkvault_forget', 'inkvault_read', 'inkvault_remember', 'inkvault_search', 'inkvault_status'],
+  )
+})
+
+test('disabled: true registers nothing (behavior back to the original state)', async (t) => {
+  const folders = await temporaryVault(t)
   const { ctx, tools } = fakeContext()
-  install(ctx, { disabled: false, memoryRoot: root })
+  install(ctx, { disabled: true, memoryRoot: folders.memoryRoot, knowledgeRoot: folders.knowledgeRoot })
+  assert.equal(tools.size, 0)
+})
+
+test('unset roots create no folders and leave only the status tool', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'inkvault-unset-'))
+  t.after(() => fs.rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }))
+  const { ctx, tools } = fakeContext()
+  const runtime = install(ctx, { disabled: false, memoryRoot: '', knowledgeRoot: '' })
+  assert.deepEqual([...tools.keys()], ['inkvault_status'])
+  assert.equal(runtime.memoryOn, false)
+  assert.equal(runtime.knowledgeOn, false)
+  assert.ok(runtime.issues.some((issue) => issue.includes('memoryRoot is unset')))
+  assert.ok(runtime.issues.some((issue) => issue.includes('knowledgeRoot is unset')))
+
+  const status = await tools.get('inkvault_status').execute({}, {})
+  assert.equal(status.memory.configured, false)
+  assert.equal(status.memory.root, '')
+  assert.equal(status.knowledge.configured, false)
+  // Nothing was created anywhere on disk.
+  assert.deepEqual(await fs.readdir(root), [])
+})
+
+test('status reports where each vault is', async (t) => {
+  const folders = await temporaryVault(t)
+  const { tools } = installWith(folders)
+  await tools.get('inkvault_remember').execute({ text: '状态检查用记忆。' }, {})
+  await tools.get('inkvault_note_save').execute({ text: '状态检查用知识。' }, {})
+  const status = await tools.get('inkvault_status').execute({}, {})
+  assert.equal(status.memory.configured, true)
+  assert.equal(status.memory.root, folders.memoryRoot)
+  assert.equal(status.memory.notes, 1)
+  assert.equal(status.knowledge.configured, true)
+  assert.equal(status.knowledge.root, folders.knowledgeRoot)
+  assert.equal(status.knowledge.notes, 1)
+  assert.match(status.memory.indexFile, /\.inkvault[\\/]index\.json$/)
+})
+
+test('memory tools round-trip: remember, search, read, forget', async (t) => {
+  const folders = await temporaryVault(t)
+  const { tools } = installWith(folders)
   const exec = { agent: { session: { id: 'tool-session' } } }
 
   const remembered = await tools.get('inkvault_remember').execute(
@@ -190,13 +267,16 @@ test('tools round-trip: remember, search, read, forget', async (t) => {
   assert.ok(readAfter instanceof Error)
 })
 
-test('config validation falls back to defaults with issues', () => {
+test('config validation: no invented default folders, bad values fall back with issues', () => {
   const { config, issues } = resolveConfig({ injectBudgetTokens: 'lots', captureMaxPerTurn: 99, mystery: true })
   assert.equal(config.injectBudgetTokens, 800)
   assert.equal(config.captureMaxPerTurn, 2)
   assert.equal(config.disabled, true)
+  assert.equal(config.memoryRoot, '')
+  assert.equal(config.knowledgeRoot, '')
   assert.ok(issues.some((issue) => issue.includes('injectBudgetTokens')))
   assert.ok(issues.some((issue) => issue.includes('mystery')))
+  assert.ok(issues.some((issue) => issue.includes('memoryRoot is unset')))
 })
 
 // The host registry accepts only this JSON Schema subset (`dsh-tools`
@@ -244,12 +324,11 @@ function assertSupportedSubset(schema, where) {
   if (schema.type === 'array') assertSupportedSubset(schema.items, `${where}.items`)
 }
 
-test('every registered tool schema stays inside the host-supported JSON Schema subset', async (t) => {
-  const root = await temporaryVault(t)
-  const { ctx } = fakeContext()
-  const runtime = install(ctx, { disabled: true, memoryRoot: root })
+test('every tool schema stays inside the host-supported JSON Schema subset', async (t) => {
+  const folders = await temporaryVault(t)
+  const { runtime } = installWith(folders)
   const definitions = toolDefinitions(runtime)
-  assert.equal(definitions.length, 4)
+  assert.equal(definitions.length, 8)
   for (const definition of definitions) {
     assert.equal(typeof definition.name, 'string')
     assert.equal(typeof definition.description, 'string')
