@@ -1,0 +1,9 @@
+# dsh-inkvault bundle patch: inserts the host-side plugin row.
+- insert:
+    - id: inkvault
+      name: dsh-inkvault
+      config:
+        # Safe default: the plugin row is loaded and its explicit tools are
+        # available, but automatic recall/capture stay off until enabled.
+        disabled: true
+        memoryRoot: ''
