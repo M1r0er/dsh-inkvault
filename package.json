@@ -1,17 +1,19 @@
 {
   "name": "dsh-inkvault",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "private": true,
   "description": "Local Markdown/Obsidian memory vault for DeepSeek Harness: path-isolated auto recall and capture.",
   "type": "module",
   "main": "index.js",
   "exports": {
     ".": "./index.js",
+    "./client": "./client.js",
     "./locale/*.json": "./locale/*.json",
     "./icon": "./icon.svg"
   },
   "files": [
     "index.js",
+    "client.js",
     "src/*.js",
     "cordis.patch.yml",
     "locale/*.json",
@@ -25,6 +27,13 @@
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-settings-shell"
+      ]
     }
   },
   "scripts": {
