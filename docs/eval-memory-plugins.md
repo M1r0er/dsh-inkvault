@@ -1,13 +1,13 @@
 # 记忆插件对比测评：灵枢 / engram / InkVault
 
-> 测评日期：2026-10-19 · 环境：DSH `0.2.1-rc.2`、Windows、Node 24 · 目的：决定三套记忆系统如何分工，避免重复注入与数据重复。
+> 测评日期：2026-10-19（同日按用户决定移除 engram） · 环境：DSH `0.2.1-rc.2`、Windows、Node 24 · 目的：决定三套记忆系统如何分工，避免重复注入与数据重复。
 
 ## 1. 对象
 
 | 系统 | 形态 | 数据 | 本机状态 |
 |---|---|---|---|
 | **灵枢** `@furongjun1999/dsh-memory` 0.8.1 | DSH 插件 + MCP server | `md_cg` 认知图（纯 Markdown），`~/.dsh/.dsh-memory`（114 条，1.5 MB） | 已装、已注入 |
-| **engram** `@kenz1117/dsh-engram` 0.9.1 | DSH 插件（Host + Client） | SQLite 三库（user/project/shared）+ FTS5 + 本地向量，`~/.dsh/engram` | 本次安装（测评） |
+| **engram** `@kenz1117/dsh-engram` 0.9.1 | DSH 插件（Host + Client） | SQLite 三库（user/project/shared）+ FTS5 + 本地向量，`~/.dsh/engram` | 本次安装测评，**测评后已移除** |
 | **InkVault** `dsh-inkvault` 0.3.0 | DSH 插件（Host + Client） | 双目录 Markdown（`D:\Obsidian库\...`） | 已装、`inject: true` |
 
 ## 2. 方法
@@ -50,4 +50,4 @@
 
 - engram 测试条目：`user` 2 条（偏好阁#1、事实厅#1）、`project` 3 条（决策堂#1/#2、往事廊#1）。
 - InkVault 测试条目：`m-20261019-079fd2`（语言偏好，保留）、`m-20261019-f458c0`（迁移记录，保留）；重复的 `m-20261019-a0a63d` 已归档去重。
-- 移除 engram：`plugin_manager remove_bundle @kenz1117/dsh-engram`，数据在 `~/.dsh/engram` 可整体删除（约 1.6 MB，不含 node_modules）。
+- 移除 engram：`plugin_manager remove_bundle @kenz1117/dsh-engram` 在本机两次卡在 pnpm 阶段（10 分钟无输出），最终手动完成：从 profile `package.json` 去掉依赖、从 `pnpm-lock.yaml` 去掉 importer 条目、删除 `node_modules/{@kenz1117,@huggingface,onnxruntime-node}` 与 `~/.dsh/engram`。回收约 **300 MB**（onnxruntime-node 289 MB + transformers 14 MB + 插件与数据）。lockfile 的 packages 快照条目留待下次 `pnpm install` 自动清理。
