@@ -119,7 +119,7 @@
 ### 1.6 命名与包
 
 - npm 包名：`dsh-inkvault`；显示名：**墨库 / InkVault**
-- 仓库：`dsh-inkvault`，private；零运行时依赖
+- 仓库：`dsh-inkvault`，**public**（2026-10-19 按用户要求从 private 切换）；零运行时依赖
 - `engines.dsh`：`>=0.2.1-rc.2 <0.2.2`
 
 ### 1.7 设计原则
