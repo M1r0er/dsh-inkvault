@@ -71,6 +71,22 @@ dsh plugin --profile web add "D:\DSH Workspace\dsh-inkvault"
 
 配置非法时回落到默认值并记录 warning，不会阻断插件加载。
 
+### 接入现有 Obsidian 库（推荐）
+
+默认 `memoryRoot` 是独立目录 `~/InkVault/Memory`（Obsidian 可打开，但不会出现在你已有的库里）。若希望记忆直接出现在自己的 Obsidian 库中，把 `memoryRoot` 指向库内一个子目录即可：
+
+```yaml
+- id: inkvault
+  config:
+    disabled: true
+    memoryRoot: '~\Documents\Obsidian Vault\InkVault'
+```
+
+- 实际结构：`<ObsidianVault>/InkVault/memory/*.md`，Obsidian 打开库即可看到 `InkVault` 文件夹。
+- `InkVault/.inkvault/` 与 `.trash/` 是点目录，Obsidian 默认忽略；删除 `.inkvault/index.json` 可自动重建。
+- 写入范围仍被限制在 `InkVault/` 子目录内，库内其他个人笔记不会被插件改写（G3 路径隔离）。
+- 一键迁移脚本：`scripts/configure-obsidian-vault.ps1`（会先备份 profile 补丁，并复制旧目录笔记）。
+
 ## vault 布局与记忆格式
 
 ```
