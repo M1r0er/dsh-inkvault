@@ -36,7 +36,9 @@ dsh plugin --profile web add "D:\DSH Workspace\dsh-inkvault"
 
 ## 配置
 
-在 profile 的 `cordis.patch.yml` 里覆盖 `inkvault` 的 config（`config` 是整体替换，未写的键用代码默认值）：
+插件导出了 schemastery `Config`，所以 DSH 会在 **设置 / 插件页** 里为「墨库 InkVault」生成配置表单：直接填两个文件夹路径与各开关即可（路径仍支持 `~` 展开）。改完由 Host 写回 profile 补丁并生效。
+
+也可以直接编辑 profile 的 `cordis.patch.yml`（`config` 是整体替换，未写的键用默认值）：
 
 ```yaml
 - id: inkvault
@@ -180,7 +182,7 @@ node --test test/*.test.js
 
 ## 版本、验证与路线
 
-- 当前 **v0.2.0**：双功能（知识库 + 记忆库）、独立开关、独立目录、8 个工具、`inkvault_status`、路径隔离、BM25、原子写与索引重建。
+- 当前 **v0.2.1**：双功能（知识库 + 记忆库）、独立开关、独立目录、8 个工具、`inkvault_status`、路径隔离、BM25、原子写与索引重建；导出 schemastery `Config`，设置页可直接编辑两个目录与开关。
 - 自动化测试 **114 项**（113 pass / 1 skip；skip 为当前主机无权限创建文件符号链接）。
 - 版本规则：`vx.y.z`，初版 `v0.1.0`；普通更新 z+1，较大更新 y+1，x 仅在明确要求时变动；每个版本对应一个 tag。
 

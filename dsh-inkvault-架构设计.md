@@ -2,8 +2,8 @@
 
 | 项 | 内容 |
 |---|---|
-| 文档版本 | v0.3 |
-| 项目版本 | **v0.2.0** |
+| 文档版本 | v0.4 |
+| 项目版本 | **v0.2.1** |
 | 项目名 | **dsh-inkvault**（显示名：墨库 / InkVault） |
 | 状态 | 双功能已实现、测试通过并安装验证 |
 | 范围 | DeepSeek Harness（DSH）的 Obsidian 桥接插件 |
@@ -45,8 +45,8 @@
 **F5. 不能新增会话事件类型。**
 `Session.append()` 无法写 `ignorable: true`；新增未知类型会让会话无法重新打开。插件因此不追加任何自定义会话事件：知识/记忆只写 Markdown 文件，索引是派生数据。
 
-**F6. profile 链接包不能裸导 `@deepseek-ai/*`，所以插件零依赖。**
-本地目录安装会把包 link 进 profile，真实路径在工作区；工作区没有 `node_modules`。因此不导出 schemastery `Config`、不使用 `defineTool`，配置在 `src/config.js` 自校验，工具定义直接构造。
+**F6. profile 链接包不能裸导 `@deepseek-ai/*`，所以插件只依赖 schemastery。**
+本地目录安装会把包 link 进 profile，真实路径在工作区；工作区没有 node_modules。v0.2.1 起把 `@deepseek-ai/schemastery` 作为**唯一运行时依赖**装进工作区（`pnpm install`），导出 `Config` 供 Host 投影为设置表单；其余工具定义仍直接构造，不使用 `defineTool`。注意：链接安装需要工作区先 `pnpm install`，发布安装则由 pnpm 正常解析依赖。
 
 **F7. 注入必须显式标注为不可信数据。**
 召回块以 `<inkvault-memory trust="untrusted-data">` 开头，并带 `source.kind = 'inkvault-recall'` 标记（防自召回 / 自捕获）。
@@ -78,7 +78,7 @@
 | N4 | MCP 服务端 / OpenViking / Hindsight 后端 | 本地优先，不引入外部依赖 |
 | N5 | **自动**把整轮对话沉淀为知识笔记 | v0.2 知识写入是显式工具调用；自动沉淀先放记忆侧 |
 | N6 | 发布 Obsidian 社区插件 | 只做 DSH 侧 |
-| N7 | schemastery `Config` 表单 | F6；配置靠 profile patch + 自校验 |
+| N7 | **目录选择器** UI（选择按钮 / 目录浏览对话框） | v0.2.1 先提供设置表单的文本路径字段；原生选择器随 v0.3 客户端 UI |
 | N8 | 接管用户已有个人笔记 | 只写配置的两个 root；不扫描、不改写其他目录 |
 
 ### 1.4 成功判据
@@ -270,7 +270,7 @@ token 估算：CJK 1 token/字，其余 4 字符/token，向上取整（保守�
 | 项 | 事实 | 影响 |
 |---|---|---|
 | 插件形态 | 命名导出 `name` / `inject` / `apply`（无 default export） | default export 会让 Loader 折叠模块并丢 `inject` |
-| 依赖解析 | profile 链接包按真实路径解析，无法裸导 `@deepseek-ai/*` | 零依赖；不导出 schemastery `Config`；不用 `defineTool` |
+| 依赖解析 | profile 链接包按工作区真实路径解析；v0.2.1 起工作区安装 `@deepseek-ai/schemastery` | 唯一运行时依赖是 schemastery；导出 `Config`；不用 `defineTool` |
 | 配置 | 无 `Config` 导出时 loader 原样传 config | `src/config.js` 自校验；profile 补丁 config 整体替换 |
 | 工具 schema | 支持子集（F4） | 只用受支持关键字 |
 | 事件 | F1/F4/F5 | 召回 pre-step、沉淀 turn-stopping、不新增会话事件 |
@@ -307,7 +307,8 @@ token 估算：CJK 1 token/字，其余 4 字符/token，向上取整（保守�
 |---|---|---|
 | v0.1.0 | 单功能：记忆库（召回/沉淀/4 工具/路径隔离/BM25） | 已完成 |
 | **v0.2.0** | 双功能：知识库 + 记忆库；独立开关与目录；`inkvault_status`；8 工具；无默认目录 | 当前 |
-| v0.2.1 | 已知问题修复；知识笔记的 wikilink/标签增强 | 计划 |
+| **v0.2.1** | 导出 schemastery `Config`：设置/插件页出现「墨库」表单，可直接编辑两个目录与开关 | 当前 |
+| v0.2.2 | 已知问题修复；知识笔记的 wikilink/标签增强 | 计划 |
 | v0.3.0 | UI（设置页、候选审核、库位置选择器）；对话内「存到知识库」交互 | 计划 |
 | v0.4.0 | 语义检索（可选本地 embedding）；冲突合并建议 | 计划 |
 
@@ -321,7 +322,7 @@ token 估算：CJK 1 token/字，其余 4 字符/token，向上取整（保守�
 | Q2 | 是否设默认目录？ | **否**；未配置的功能不激活，避免 C 盘堆积与「不知道库在哪」 |
 | Q3 | 两个 root 能否是同一目录？ | 不建议；默认保持目录分离（`memory/` 与 `notes/`），避免两种数据混写 |
 | Q4 | 知识写入是否自动？ | v0.2 显式工具；自动沉淀留到记忆侧候选机制之后评估 |
-| Q5 | 是否需要目录选择 UI？ | v0.3 做（宿主 slot）；v0.2 用 profile 配置 + `inkvault_status` |
+| Q5 | 是否需要目录选择 UI？ | v0.2.1 设置表单（文本路径）已可用；**原生目录选择器** v0.3 做（客户端 slot + `directoryPicker`） |
 
 ---
 
@@ -347,6 +348,7 @@ token 估算：CJK 1 token/字，其余 4 字符/token，向上取整（保守�
 | D16 | 两个功能独立开关、独立注册工具 | G3 |
 | D17 | 增加 `inkvault_status` 作为可发现性入口 | G5 |
 | D18 | 知识写入显式、记忆沉淀自动 | 误存知识代价高 |
+| D19 | 导出 schemastery `Config`，让设置页承担目录配置 | 用户需要可视化选择两个库目录，而不是手改 profile 补丁 |
 
 ---
 
@@ -357,3 +359,4 @@ token 估算：CJK 1 token/字，其余 4 字符/token，向上取整（保守�
 | v0.1-draft | 2026-10-19 | 建立文档，落地 §1，§2–§9 待设计 |
 | v0.2 | 2026-10-19 | 核对并修正 F1/F4；新增 F5/F6/F7；补齐 §2–§9 |
 | v0.3 | 2026-10-19 | 修正产品定位：知识库一等功能；新增 F8/F9；两个 root 显式配置；补 §4 知识写入、§10 版本规则、D14–D18 |
+| v0.4 | 2026-10-19 | 导出 schemastery `Config`（设置表单可改两个目录）；F6/N7/§7/Q5 同步；D19 |

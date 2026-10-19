@@ -27,6 +27,9 @@ import { registerTools } from './src/tools.js'
 /** Loader plugin name. */
 export const name = 'inkvault'
 
+/** Settings form schema projected by the Host into the Plugin settings page. */
+export { Config } from './src/config-schema.js'
+
 /** The plugin registers tools and listens to events; it needs the tool registry. */
 export const inject = ['tools']
 
