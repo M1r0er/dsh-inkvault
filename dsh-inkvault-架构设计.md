@@ -4,7 +4,7 @@
 |---|---|
 | 文档版本 | v0.2 |
 | 项目名 | **dsh-inkvault**（显示名：墨库 / InkVault） |
-| 状态 | **§1–§9 已出**；v0.1.0 已实现并通过测试 |
+| 状态 | **§1–§9 已出**；v0.1.0 已实现、测试通过并安装验证 |
 | 范围 | DeepSeek Harness（DSH）的 Obsidian / Markdown 记忆插件 |
 | 目标环境 | DSH `0.2.1-rc.2` · Node ≥ 20 · Windows 为主 |
 | 最后更新 | 2026-10-19 |
@@ -99,6 +99,12 @@
 | S4 | 隔离生效 | 对个人库路径的任何写入（含 `..`、绝对路径、UNC、符号链接/junction）被拒绝，有测试用例覆盖 |
 | S5 | 可恢复 | 删 `.inkvault/index.json` 重启自动重建；模拟崩溃窗口后 journal 可读、无半写记忆 |
 | S6 | 可关闭 | 配置 `disabled: true` 后无自动注入、无自动沉淀；显式工具仍可用 |
+
+**实施验证（2026-10-19，v0.1.0）**：
+- 自动化测试 **109 项**（108 pass / 1 skip；skip 为当前主机无权限创建文件符号链接，junction 逃逸用例已执行），命令 `node --test test/*.test.js`。
+- 已通过 `plugin_manager install_bundle` 安装进当前 profile（`application: applied`，无 warning），四个 `inkvault_*` 工具出现在模型工具表 —— **S1 实测通过**。
+- 已实测 `inkvault_remember → search → read → forget`：`memory/<id>.md`、`.inkvault/index.json`、`.inkvault/journal.jsonl`、`.trash/<id>-<ts>.md` 均符合 §2/§3 预期。
+- S2/S3/S5 由集成测试覆盖（`test/plugin.test.js` 驱动 pre-step / session-event / turn-stopping 契约）；自动行为默认关闭，S6 由测试覆盖；实测产生的临时 vault 已清理。
 
 ### 1.5 架构总览
 

@@ -145,6 +145,12 @@ node --test test/          # 全部单元 + 集成测试
 
 内部模块契约见 [docs/internal-contract.md](docs/internal-contract.md)，架构决策见 [dsh-inkvault-架构设计.md](dsh-inkvault-架构设计.md)。
 
+## 验证状态
+
+- 自动化测试：**109 项**（108 pass / 1 skip；skip 是当前主机无权限创建文件符号链接，junction 逃逸用例已执行）。
+- 已用 `plugin_manager` 安装进当前 profile（`application: applied`），四个 `inkvault_*` 工具已出现在模型工具表，并实测完成 `remember → search → read → forget` 往返（文件、索引、journal、`.trash` 均正确）。
+- 自动召回/自动沉淀由 `test/plugin.test.js` 按真实事件契约验证；默认 `disabled: true`，所以安装后不会自动写入任何内容。
+
 ## 已知限制
 
 - 召回是词法 BM25（中文按 2-gram），不做语义/向量检索。
