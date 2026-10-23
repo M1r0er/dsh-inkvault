@@ -20,6 +20,7 @@ import path from 'node:path'
 import { resolveConfig, memoryActive, knowledgeActive } from './src/config.js'
 import { makeEntryId, hashText, titleFromBody } from './src/frontmatter.js'
 import { extractQueryText, buildInjectionText, buildRecallMessage } from './src/recall.js'
+import { buildDirectiveText, MAX_DIRECTIVE_CHARS } from './src/prompt.js'
 import { extractCandidates, textOfContent } from './src/capture.js'
 import { VaultStore } from './src/store.js'
 import { registerTools } from './src/tools.js'
@@ -35,6 +36,9 @@ export const inject = ['tools']
 
 const MAX_TRACKED_INJECTIONS = 1000
 const MAX_BUFFERED_TURNS = 50
+
+/** Assembly-context name for the standing-directive block (stable across steps). */
+const DIRECTIVE_CONTEXT_NAME = 'inkvault:directives'
 
 /** Memoize one store's lazy initialization; failures stay retryable. */
 function makeReady(store) {
@@ -127,6 +131,35 @@ export function createRuntime(rawConfig, deps = {}) {
   }
 
   /**
+   * Build the standing-directive block for one `system-prompt/assemble` pass.
+   *
+   * Unlike {@link recallMessage} this is **not** keyword-gated: every assemble
+   * pass re-derives the same text from the vault, so the rendered snapshot stays
+   * byte-identical and the Host appends nothing until a directive note actually
+   * changes. Returning `null` (no directive entries, or over budget) means the
+   * caller pushes no context — that is a real snapshot change, so it is only
+   * ever reached on a genuine transition, never per turn.
+   *
+   * @returns {Promise<{ name: string, text: string } | null>} context to push.
+   */
+  async function directiveContext() {
+    if (!memoryOn || config.disabled || !config.directives) return null
+    await ensureMemoryReady()
+    const entries = await memoryStore.listEntries()
+    const built = buildDirectiveText(entries, { maxChars: config.maxDirectiveChars })
+    if (built === null) return null
+    if (built.text === null) {
+      // Refuse rather than truncate: a half-stated standing rule is worse than
+      // an absent one, and silent per-entry dropping makes "which rules apply"
+      // drift with note order.
+      warn(`directive block skipped: ${built.overflow} chars exceeds maxDirectiveChars ${built.maxChars}; shorten or split the standing rules`)
+      return null
+    }
+    debug('directive', { count: built.count, chars: built.text.length })
+    return { name: DIRECTIVE_CONTEXT_NAME, text: built.text }
+  }
+
+  /**
    * `agent/pre-step` waterfall listener body. Always returns the next decision,
    * spread so fields such as `startsRequestSeries` survive.
    */
@@ -182,6 +215,7 @@ export function createRuntime(rawConfig, deps = {}) {
       now,
       maxCandidates: config.captureMaxPerTurn,
       minConfidence: config.minCaptureConfidence,
+      directiveTriggers: config.directiveTriggers,
     })
     if (candidates.length === 0) return
     await ensureMemoryReady()
@@ -205,6 +239,7 @@ export function createRuntime(rawConfig, deps = {}) {
           source: 'capture',
           hash,
           origin: sessionId,
+          delivery: candidate.delivery ?? 'recall',
         },
         body: candidate.body,
       })
@@ -280,6 +315,7 @@ export function createRuntime(rawConfig, deps = {}) {
     ensureMemoryReady,
     ensureKnowledgeReady,
     recallMessage,
+    directiveContext,
     handlePreStep,
     handleSessionEvent,
     handleTurnStopping,
@@ -316,6 +352,7 @@ export function createRuntime(rawConfig, deps = {}) {
           source: 'manual',
           hash: hashText(input.body),
           origin: input.origin ?? '',
+          delivery: input.delivery ?? 'recall',
         },
         body: input.body,
       })
@@ -399,6 +436,22 @@ export function install(ctx, rawConfig) {
     ctx.on('agent/turn-stopping', (payload) => runtime.handleTurnStopping(payload))
     ctx.on('agent/disposed', ({ agent }) => {
       try { runtime.turnBuffers.delete(agent?.session?.id) } catch { /* ignore */ }
+    })
+    // Directive lane (channel B): push a stable context on EVERY assemble pass.
+    // Skipping a pass would itself change the rendered snapshot and make the
+    // Host append an extra copy — see src/prompt.js.
+    ctx.on('system-prompt/assemble', async (assembly, _context, next) => {
+      try {
+        const block = await runtime.directiveContext()
+        if (block !== null && assembly !== null && typeof assembly === 'object') {
+          if (!Array.isArray(assembly.contexts)) assembly.contexts = []
+          assembly.contexts.push(block)
+        }
+      } catch (error) {
+        // Never throw out of assemble: the Host turns that into a failed request.
+        try { ctx.logger?.warn?.(`inkvault: directive block skipped: ${String(error)}`) } catch { /* ignore */ }
+      }
+      return next()
     })
   }
   return runtime

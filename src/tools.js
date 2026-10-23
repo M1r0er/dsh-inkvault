@@ -14,10 +14,11 @@
  * property.
  * @module dsh-inkvault/tools
  */
-import { makeEntryId } from './frontmatter.js'
+import { makeEntryId, ENTRY_DELIVERIES } from './frontmatter.js'
 import { snippetOf } from './recall.js'
 
 const KINDS = ['preference', 'fact', 'decision', 'project', 'reference', 'task']
+const DELIVERIES = [...ENTRY_DELIVERIES]
 const KNOWLEDGE_KINDS = ['reference', 'fact', 'decision', 'project', 'preference', 'task']
 const STATUSES = ['active', 'pending', 'superseded', 'archived']
 
@@ -207,6 +208,11 @@ export function memoryToolDefinitions(runtime) {
           kind: { type: 'string', enum: KINDS, description: 'Note kind; defaults to fact.' },
           tags: { type: 'array', items: { type: 'string' }, description: 'Optional lowercase tags for keyword search.' },
           confidence: { type: 'number', description: 'How certain the note is, 0-1; defaults to 0.9.' },
+          delivery: {
+            type: 'string',
+            enum: DELIVERIES,
+            description: 'recall = reference data recalled by keyword match; prompt = user-declared directive kept in the system prompt every turn. Defaults to recall.',
+          },
         },
         ['text'],
       ),
@@ -221,12 +227,15 @@ export function memoryToolDefinitions(runtime) {
         if (typeof confidence !== 'number' || confidence < 0 || confidence > 1) throw new Error('confidence must be between 0 and 1')
         const kind = args.kind ?? 'fact'
         if (!KINDS.includes(kind)) throw new Error(`kind must be one of: ${KINDS.join(', ')}`)
+        const delivery = args.delivery ?? 'recall'
+        if (!DELIVERIES.includes(delivery)) throw new Error(`delivery must be one of: ${DELIVERIES.join(', ')}`)
         const record = await runtime.remember({
           body,
           kind,
           title: args.title,
           tags: Array.isArray(args.tags) ? args.tags : [],
           confidence,
+          delivery,
           origin: exec?.agent?.session?.id ?? '',
           now: runtime.now(),
         })

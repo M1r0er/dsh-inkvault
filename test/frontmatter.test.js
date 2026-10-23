@@ -35,6 +35,7 @@ const SAMPLE_META = {
   source: 'capture',
   hash: '0123456789abcdef',
   origin: '',
+  delivery: 'recall',
 }
 const SAMPLE_BODY = '正文 Markdown。'
 
@@ -154,8 +155,8 @@ test('stringifyDocument writes fixed key order, inline tags and no trailing body
   const lines = markdown.split('\n')
   assert.equal(lines[0], '---')
   assert.deepEqual(
-    lines.slice(1, 12).map((line) => line.slice(0, line.indexOf(':'))),
-    ['id', 'title', 'kind', 'status', 'created', 'updated', 'tags', 'confidence', 'source', 'hash', 'origin'],
+    lines.slice(1, 13).map((line) => line.slice(0, line.indexOf(':'))),
+    ['id', 'title', 'kind', 'status', 'created', 'updated', 'tags', 'confidence', 'source', 'hash', 'origin', 'delivery'],
   )
   assert.ok(lines.includes('tags: [preference, language]'))
   assert.ok(lines.includes("origin: ''"))

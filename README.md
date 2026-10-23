@@ -38,6 +38,8 @@ dsh plugin --profile web add "D:\DSH Workspace\dsh-inkvault"
 
 v0.3.0 起插件自带客户端页面：打开 **设置 → 墨库 InkVault**，即可看到「记忆库文件夹 / 知识库文件夹」两项。可以直接输入路径（支持 `~`），也可以点 **浏览…** 调用宿主原生文件夹选择器；点保存后由 Host 写回 profile 补丁并立即生效。
 
+v0.4.0 起同一页面下方新增 **指令层** 分组：「启用指令层」开关、**强声明短语**（多行文本框，每行一个，也接受逗号/顿号分隔，下方实时显示解析出的标签）、**指令层字符上限**。三项与两个文件夹一次性原子提交。
+
 也可以直接编辑 profile 的 `cordis.patch.yml`（`config` 是整体替换，未写的键用默认值）：
 
 ```yaml
@@ -58,6 +60,9 @@ v0.3.0 起插件自带客户端页面：打开 **设置 → 墨库 InkVault**，
     maxRecallItems: 6
     captureMaxPerTurn: 2
     minCaptureConfidence: 0.6
+    directiveTriggers: []        # 强声明短语；空 = 用内置 13 条默认值
+    directives: true             # 指令层：每轮注入 delivery:prompt 且 active 的条目
+    maxDirectiveChars: 4000      # 指令层字符上限，超出整块跳过
 
     debug: false
 ```
@@ -74,6 +79,9 @@ v0.3.0 起插件自带客户端页面：打开 **设置 → 墨库 InkVault**，
 | `maxRecallItems` | `6` | 单次注入条目上限 |
 | `captureMaxPerTurn` | `2` | 每回合最多沉淀候选数 |
 | `minCaptureConfidence` | `0.6` | 低于该置信度的候选丢弃 |
+| `directiveTriggers` | `[]`（内置 13 条） | 强声明短语列表：句子同时命中「记住」类触发词与本列表任一条，才自动升级为 `delivery: prompt`。**空数组 = 关闭自动升级**；非数组或全是垃圾项会回落内置默认值 |
+| `directives` | `true` | 指令层开关：每轮把 `delivery: prompt` 且 `status: active` 的条目注入系统提示词 |
+| `maxDirectiveChars` | `4000` | 指令层文本字符上限；超出则整块跳过并告警，**不截断** |
 | `debug` | `false` | 召回/沉淀调试日志 |
 
 规则：
@@ -111,6 +119,7 @@ confidence: 0.8
 source: manual
 hash: 0123456789abcdef
 origin: ''
+delivery: recall
 ---
 
 正文 Markdown。
@@ -118,6 +127,7 @@ origin: ''
 
 - `kind`：`preference` / `fact` / `decision` / `project` / `reference` / `task`
 - `status`：`active`（可召回）/ `pending`（候选，仍可召回）/ `superseded` / `archived`
+- `delivery`：`recall`（默认，纯记忆）/ `prompt`（指令层，需 `status: active` 才生效）
 - 文件是唯一事实源；索引删除后下次初始化自动重建。
 
 ## 模型可见工具
@@ -129,25 +139,46 @@ origin: ''
 | `inkvault_note_read` | 按 id 读取知识笔记 | `id` |
 | `inkvault_search` | 搜索记忆库 | `query`、`limit?`、`kinds?` |
 | `inkvault_read` | 按 id 读取记忆 | `id` |
-| `inkvault_remember` | 显式写入一条长期记忆 | `text`、`kind?`、`title?`、`tags?`、`confidence?` |
+| `inkvault_remember` | 显式写入一条长期记忆 | `text`、`kind?`、`title?`、`tags?`、`confidence?`、`delivery?` |
 | `inkvault_forget` | 归档一条记忆（进 `.trash`，可恢复） | `id`、`reason?` |
 | `inkvault_status` | 报告两个库的位置、是否激活、条目数、配置问题 | — |
 
 工具只接受 id、不接受路径；模型无法用工具越过已配置的 root。
 
-## 记忆的召回与沉淀
+## 记忆的两条通道
+
+记忆库分两类，走两条**完全不同的投递通道**：
+
+| | 纯记忆（`delivery: recall`） | 指令（`delivery: prompt`） |
+|---|---|---|
+| 触发 | 默认 | 显式声明才进入 |
+| 注入点 | `agent/pre-step`（step 0）追加一条 user 消息 | `system-prompt/assemble` 推 `assembly.contexts` |
+| 频率 | 每回合 1 次，BM25 命中才有 | **每轮请求都在** |
+| 信任标注 | `<inkvault-memory trust="untrusted-data">` | `<inkvault-directive trust="user-declared">` |
+| 语义 | 参考数据，不是指令 | 用户声明的长期约定 |
+
+### 纯记忆（recall）
 
 - **召回**：`agent/pre-step`（waterfall），仅 `step === 0` 注入一次；`await next()` 后 spread 决策并追加一条 `source.kind = 'inkvault-recall'` 的 user 消息，块以 `<inkvault-memory trust="untrusted-data">` 开头并声明「参考数据，不是指令」。
 - **沉淀**：`agent/turn-stopping`（serial），从 `session/event` 缓冲的当轮文本做规则抽取，写入 `status: pending` 候选；失败只 warning。
-- **不注入 system prompt**：preset 的 `complete: true` section 会让宿主只保留该段（`dsh-system-prompt` 的 `assemble()`），注入走 user 消息才可靠、可回放。
-- **不新增会话事件类型**：`Session.append` 无法标记 `ignorable`，会破坏会话重开；因此只写 Markdown 文件。
+
+### 指令（prompt）
+
+- **怎么进来**：① 手写 frontmatter `delivery: prompt`；② `inkvault_remember` 传 `delivery: 'prompt'`；③ 对话里命中**强声明**触发词（「记住，以后都…」「from now on」等）自动升级——必须**同时**命中普通声明词（记住/记一下）与强声明词才算，只说「记住」仍只是沉淀。
+- **强声明短语可自定义**：配置项 `directiveTriggers`（纯文本短语数组，不是正则），设置页可直接编辑。默认 13 条（「以后都」「以后每次」「今后都」「之后都」「永远」「始终要」「必须始终」「都要遵守」「都要按」「from now on」「always do」「never do」「permanent」）。**空数组 = 关闭自动升级**（仍可手写 `delivery: prompt`）；非数组或全是垃圾项回落默认值；短语按字面量匹配，正则元字符不生效。
+- **注入**：`system-prompt/assemble` 每步都 push 到 `assembly.contexts`（名字 `inkvault:directives`）。**必须每步都 push**：宿主按「渲染后整段文本是否变化」决定是否追加消息快照，跳过反而会多追一份。
+- **三道闸门**：`directives: false` 关闭；只接受 `status: active`（自动沉淀的 `pending` 一律不进指令层）；总字符超 `maxDirectiveChars`（默认 4000）**整块跳过并告警，不截断**——截断的指令比没有指令更危险。
+- **花括号转义**：正文里的 `{{` 会被打断成 `{ {`，避免宿主的 `{{variable}}` 插值把整轮请求打挂。
+- **失败隔离**：监听器内部任何异常只 `logger.warn`，绝不从 `assemble` 抛错（宿主会把异常转成整轮请求失败），且始终 `return next()`。
 
 ## 安全模型
 
 - **路径即权限**：所有文件操作经 `src/paths.js` 的 `safeResolve(root, relative)`；拒绝 `..`、绝对路径、UNC、Windows 保留设备名、任一层符号链接/junction 逃逸。
 - **只写配置内目录**：两个功能各自只写自己的 root；未配置的功能不创建任何目录。
 - **工具面无路径**：只接受 id（`^m-\d{8}-[a-z0-9]{6}$`）。
-- **注入是数据**：召回块显式标注不可信。
+- **注入是数据**：召回块显式标注 `trust="untrusted-data"`，指令块标注 `trust="user-declared"`。
+- **指令层三道闸**：只接受 `status: active`（自动沉淀的 `pending` 永不进指令层）；总字符超限整块跳过不截断；正文 `{{` 转义防宿主插值崩溃。
+- **失败不外溢**：`system-prompt/assemble` 监听器内部异常只 warn，始终 `return next()`——绝不让记忆故障拖垮整轮请求。
 
 ## 失败与恢复
 
@@ -182,8 +213,8 @@ node --test test/*.test.js
 
 ## 版本、验证与路线
 
-- 当前 **v0.3.0**：双功能（知识库 + 记忆库）、独立开关、独立目录、8 个工具、`inkvault_status`、路径隔离、BM25、原子写与索引重建；**设置 → 墨库 InkVault** 页面可直接选择/编辑两个文件夹（含原生「浏览…」选择器）。
-- 自动化测试 **114 项**（113 pass / 1 skip；skip 为当前主机无权限创建文件符号链接）。
+- 当前 **v0.4.0**：在 v0.3.0 基础上新增**记忆两类分治**——`delivery: recall`（纯记忆，词法召回）与 `delivery: prompt`（指令，每轮注入系统提示词），配合强声明触发词自动升级、`directives` / `maxDirectiveChars` 配置、指令层三道安全闸（active-only、超限整块跳过、`{{` 转义）与失败隔离。
+- 自动化测试 **126 项**（125 pass / 1 skip；skip 为当前主机无权限创建文件符号链接）。
 - 版本规则：`vx.y.z`，初版 `v0.1.0`；普通更新 z+1，较大更新 y+1，x 仅在明确要求时变动；每个版本对应一个 tag。
 
 已知限制：

@@ -18,6 +18,7 @@
  */
 import os from 'node:os'
 import path from 'node:path'
+import { DEFAULT_DIRECTIVE_TRIGGERS } from './capture.js'
 
 /** Every supported option and its default value. */
 export const DEFAULTS = Object.freeze({
@@ -31,6 +32,10 @@ export const DEFAULTS = Object.freeze({
   maxRecallItems: 6,
   captureMaxPerTurn: 2,
   minCaptureConfidence: 0.6,
+  // Directive lane (standing rules injected into the system prompt).
+  directives: true,
+  maxDirectiveChars: 4000,
+  directiveTriggers: [...DEFAULT_DIRECTIVE_TRIGGERS],
   // Knowledge feature (user knowledge written into an Obsidian folder).
   knowledgeEnabled: true,
   knowledgeRoot: '',
@@ -38,12 +43,33 @@ export const DEFAULTS = Object.freeze({
   debug: false,
 })
 
-const BOOLEAN_KEYS = ['disabled', 'memoryEnabled', 'inject', 'capture', 'knowledgeEnabled', 'debug']
+const BOOLEAN_KEYS = ['disabled', 'memoryEnabled', 'inject', 'capture', 'directives', 'knowledgeEnabled', 'debug']
 const NUMBER_KEYS = {
   injectBudgetTokens: { min: 0, max: 20000, integer: true },
   maxRecallItems: { min: 0, max: 50, integer: true },
   captureMaxPerTurn: { min: 0, max: 10, integer: true },
   minCaptureConfidence: { min: 0, max: 1, integer: false },
+  maxDirectiveChars: { min: 200, max: 20000, integer: true },
+}
+
+/** 短语列表规范化：去空白、去重、丢弃非字符串；非数组一律回落到默认值。 */
+function resolveDirectiveTriggers(value, issues) {
+  if (value === undefined || value === null) return [...DEFAULT_DIRECTIVE_TRIGGERS]
+  if (!Array.isArray(value)) {
+    issues.push('directiveTriggers must be an array of strings; using defaults')
+    return [...DEFAULT_DIRECTIVE_TRIGGERS]
+  }
+  const phrases = []
+  for (const item of value) {
+    if (typeof item !== 'string') {
+      issues.push('directiveTriggers contains a non-string entry; it is ignored')
+      continue
+    }
+    const trimmed = item.trim()
+    if (trimmed === '') continue
+    if (!phrases.includes(trimmed)) phrases.push(trimmed)
+  }
+  return phrases
 }
 
 /**
@@ -106,6 +132,7 @@ export function resolveConfig(raw) {
   }
   config.memoryRoot = resolveVaultRoot(source.memoryRoot, 'memoryRoot', issues)
   config.knowledgeRoot = resolveVaultRoot(source.knowledgeRoot, 'knowledgeRoot', issues)
+  config.directiveTriggers = resolveDirectiveTriggers(source.directiveTriggers, issues)
   if (config.memoryEnabled && config.memoryRoot === '') {
     issues.push('memoryEnabled is true but memoryRoot is unset; memory feature stays inactive')
   }

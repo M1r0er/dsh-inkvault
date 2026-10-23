@@ -16,6 +16,11 @@ window.__ModuleLoader__.load({
 
     const FIELD_MEMORY = 'memoryRoot'
     const FIELD_KNOWLEDGE = 'knowledgeRoot'
+    const FIELD_DIRECTIVES = 'directives'
+    const FIELD_TRIGGERS = 'directiveTriggers'
+    const FIELD_MAX_CHARS = 'maxDirectiveChars'
+    const MIN_DIRECTIVE_CHARS = 200
+    const MAX_DIRECTIVE_CHARS = 20000
     const SECTION_ID = 'inkvault'
     const SECTION_LABEL = '墨库 InkVault'
 
@@ -89,6 +94,32 @@ window.__ModuleLoader__.load({
         fontFamily: 'inherit',
       },
       hint: { margin: 0, color: 'var(--dsw-alias-label-tertiary)', fontSize: '12px', lineHeight: '18px' },
+      textarea: {
+        minHeight: '104px',
+        padding: '10px 12px',
+        fontSize: '13px',
+        lineHeight: '20px',
+        color: 'var(--dsw-alias-label-primary)',
+        background: 'var(--dsw-alias-bg-layer-3)',
+        border: '0.5px solid var(--dsw-alias-border-l4)',
+        borderRadius: '8px',
+        outline: 'none',
+        fontFamily: 'inherit',
+        resize: 'vertical',
+      },
+      checkboxRow: { display: 'flex', gap: '8px', alignItems: 'center', cursor: 'pointer' },
+      checkbox: { width: '16px', height: '16px', margin: 0, cursor: 'pointer' },
+      tagList: { display: 'flex', flexWrap: 'wrap', gap: '6px' },
+      tag: {
+        padding: '2px 8px',
+        fontSize: '12px',
+        lineHeight: '18px',
+        color: 'var(--dsw-alias-label-secondary)',
+        background: 'var(--dsw-alias-bg-layer-3)',
+        border: '0.5px solid var(--dsw-alias-border-l4)',
+        borderRadius: '6px',
+      },
+      sectionTitle: { margin: 0, fontSize: '15px', fontWeight: 500, lineHeight: '22px' },
       footer: { display: 'flex', alignItems: 'center', gap: '12px' },
       status: { color: 'var(--dsw-alias-label-secondary)', fontSize: '12px' },
       error: { color: 'var(--dsw-alias-state-error-primary)', fontSize: '12px' },
@@ -103,6 +134,9 @@ window.__ModuleLoader__.load({
         const [snapshot, setSnapshot] = React.useState(undefined)
         const [memoryRoot, setMemoryRoot] = React.useState('')
         const [knowledgeRoot, setKnowledgeRoot] = React.useState('')
+        const [directives, setDirectives] = React.useState(true)
+        const [triggers, setTriggers] = React.useState('')
+        const [maxChars, setMaxChars] = React.useState('')
         const [dirty, setDirty] = React.useState(false)
         const [busy, setBusy] = React.useState('')
         const [notice, setNotice] = React.useState('')
@@ -143,6 +177,11 @@ window.__ModuleLoader__.load({
           if (dirty || snapshot?.status !== 'ready' || snapshot?.value === undefined) return
           setMemoryRoot(String(snapshot.value[FIELD_MEMORY] ?? ''))
           setKnowledgeRoot(String(snapshot.value[FIELD_KNOWLEDGE] ?? ''))
+          setDirectives(snapshot.value[FIELD_DIRECTIVES] !== false)
+          const list = snapshot.value[FIELD_TRIGGERS]
+          setTriggers(Array.isArray(list) ? list.join('\n') : '')
+          const limit = snapshot.value[FIELD_MAX_CHARS]
+          setMaxChars(limit === undefined || limit === null ? '' : String(limit))
         }, [snapshot, dirty])
 
         const edit = (setter) => (event) => {
@@ -173,18 +212,39 @@ window.__ModuleLoader__.load({
           }
         }
 
-        /** Write both folders as one atomic config mutation at the read revision. */
+        /** Split the textarea into the phrase list the Host schema expects. */
+        function parseTriggers(text) {
+          const out = []
+          for (const piece of String(text ?? '').split(/[\n,，、]/)) {
+            const word = piece.trim()
+            if (word !== '' && !out.includes(word)) out.push(word)
+          }
+          return out
+        }
+
+        /** Write every edited field as one atomic config mutation at the read revision. */
         async function save() {
           if (namespace === undefined || snapshot?.revision === undefined) return
+          const limit = Number(maxChars)
+          if (maxChars.trim() !== '' && (!Number.isInteger(limit) || limit < MIN_DIRECTIVE_CHARS || limit > MAX_DIRECTIVE_CHARS)) {
+            setNotice('')
+            setFailure(`字符上限必须是 ${MIN_DIRECTIVE_CHARS}–${MAX_DIRECTIVE_CHARS} 之间的整数。`)
+            return
+          }
           setBusy('save')
           setNotice('')
           setFailure('')
           try {
             const form = configForms.get(namespace)
-            const accepted = await form.mutate([
+            const operations = [
               { op: 'set', path: [FIELD_MEMORY], value: memoryRoot.trim() },
               { op: 'set', path: [FIELD_KNOWLEDGE], value: knowledgeRoot.trim() },
-            ], snapshot.revision)
+              { op: 'set', path: [FIELD_DIRECTIVES], value: directives },
+              { op: 'set', path: [FIELD_TRIGGERS], value: parseTriggers(triggers) },
+            ]
+            // An empty box means "keep the schema default"; only send a real number.
+            if (maxChars.trim() !== '') operations.push({ op: 'set', path: [FIELD_MAX_CHARS], value: limit })
+            const accepted = await form.mutate(operations, snapshot.revision)
             if (accepted) {
               setDirty(false)
               setNotice('已保存，配置立即生效。')
@@ -226,10 +286,51 @@ window.__ModuleLoader__.load({
 
         return h('div', { style: styles.page },
           h('h2', { style: styles.title }, SECTION_LABEL),
-          h('p', { style: styles.intro }, '选择知识库与记忆库使用的文件夹。留空表示该功能不启用；插件不会创建任何未配置的目录。'),
+          h('p', { style: styles.intro }, '选择知识库与记忆库使用的文件夹，并设置指令层的升级规则。留空表示该功能不启用；插件不会创建任何未配置的目录。'),
           namespace === undefined && failure === '' ? h('p', { style: styles.hint }, '正在读取墨库配置…') : null,
           field('记忆库文件夹', memoryRoot, edit(setMemoryRoot), '例如 C:\\\\Users\\\\me\\\\Documents\\\\Obsidian Vault\\\\InkVault（支持 ~）', FIELD_MEMORY),
           field('知识库文件夹', knowledgeRoot, edit(setKnowledgeRoot), '例如 C:\\\\Users\\\\me\\\\Documents\\\\Obsidian Vault\\\\Knowledge（支持 ~）', FIELD_KNOWLEDGE),
+          h('h3', { style: styles.sectionTitle }, '指令层'),
+          h('p', { style: styles.hint }, '指令层把用户显式声明的长期约定每轮注入系统提示词；其余笔记仍走关键词召回，只作参考数据。'),
+          h('div', { style: styles.card },
+            h('label', { style: styles.checkboxRow },
+              h('input', {
+                type: 'checkbox',
+                checked: directives,
+                style: styles.checkbox,
+                disabled: !writable,
+                onChange: (event) => { setDirectives(event.target.checked); setDirty(true); setNotice('') },
+              }),
+              h('span', { style: styles.label }, '启用指令层')
+            ),
+            h('p', { style: styles.hint }, '只有 frontmatter 标了 delivery: prompt 且 status: active 的笔记会进入。关闭后这些笔记退回关键词召回，不再每轮注入。')
+          ),
+          h('div', { style: styles.card },
+            h('label', { style: styles.label }, '强声明短语'),
+            h('textarea', {
+              value: triggers,
+              placeholder: '每行一个短语，例如：\n以后都\nfrom now on',
+              spellCheck: false,
+              style: styles.textarea,
+              disabled: !writable,
+              onChange: (event) => { setTriggers(event.target.value); setDirty(true); setNotice('') },
+            }),
+            h('p', { style: styles.hint }, '一句话同时命中「记住」和这里任一短语时，才自动升级为指令层。纯文本子串匹配、大小写不敏感；留空即关闭自动升级，仍可手动写 delivery: prompt。'),
+            triggers === '' ? null : h('div', { style: styles.tagList }, parseTriggers(triggers).map((word) => h('span', { key: word, style: styles.tag }, word)))
+          ),
+          h('div', { style: styles.card },
+            h('label', { style: styles.label }, '指令层字符上限'),
+            h('input', {
+              type: 'text',
+              value: maxChars,
+              placeholder: `${MIN_DIRECTIVE_CHARS}–${MAX_DIRECTIVE_CHARS}`,
+              spellCheck: false,
+              style: styles.input,
+              disabled: !writable,
+              onChange: (event) => { setMaxChars(event.target.value); setDirty(true); setNotice('') },
+            }),
+            h('p', { style: styles.hint }, '超出上限时整块跳过并告警，不会截断——截断的指令比没有指令更危险。')
+          ),
           h('div', { style: styles.footer },
             h('button', {
               type: 'button',

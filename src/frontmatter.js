@@ -25,9 +25,18 @@ const ENTRY_ID_RE = /^m-\d{8}-[a-z0-9]{6}$/
 /** Sources accepted by {@link coerceEntry}. */
 const ENTRY_SOURCES = Object.freeze(['capture', 'manual', 'import'])
 
+/**
+ * Delivery lanes, frozen so callers cannot mutate shared vocabulary.
+ *
+ * - `recall` (default): keyword recall into a user message — hit-or-miss.
+ * - `prompt`: a standing directive injected into the system prompt on every
+ *   request. Only `active` entries may use this lane.
+ */
+export const ENTRY_DELIVERIES = Object.freeze(['recall', 'prompt'])
+
 /** Canonical frontmatter key order (see internal contract §0.1). */
 const ENTRY_KEY_ORDER = Object.freeze([
-  'id', 'title', 'kind', 'status', 'created', 'updated', 'tags', 'confidence', 'source', 'hash', 'origin',
+  'id', 'title', 'kind', 'status', 'created', 'updated', 'tags', 'confidence', 'source', 'hash', 'origin', 'delivery',
 ])
 
 /** Values YAML (and this subset) treat as null; `window` is kept for compatibility with v0.1. */
@@ -455,6 +464,17 @@ export function coerceEntry(meta, body, options = {}) {
 
   const origin = raw.origin === undefined || raw.origin === null ? '' : collapse(raw.origin)
 
+  // `delivery` records the intent declared when the note was written; it is NOT
+  // downgraded here for a non-active status. The write side must preserve the
+  // intent so that reviewing a captured candidate (`pending` → `active`) can
+  // promote it to the directive lane. The safety rule — only `active` entries
+  // reach the system prompt — is enforced on the read side in `src/prompt.js`.
+  let delivery = collapse(raw.delivery).toLowerCase()
+  if (!ENTRY_DELIVERIES.includes(delivery)) {
+    if (delivery !== '') report(`invalid delivery "${raw.delivery}"; using "recall"`)
+    delivery = 'recall'
+  }
+
   return {
     id,
     title,
@@ -467,6 +487,7 @@ export function coerceEntry(meta, body, options = {}) {
     source,
     hash,
     origin,
+    delivery,
   }
 }
 

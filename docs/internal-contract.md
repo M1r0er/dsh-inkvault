@@ -10,7 +10,8 @@
 index.js                 # 插件入口（Lead）
 src/config.js            # 配置解析与默认值（Lead）
 src/recall.js            # 召回：查询、预算、注入文本（Lead）
-src/tools.js             # 四个工具定义（Lead）
+src/prompt.js            # 指令层：过滤、渲染、转义、字符上限（Lead）
+src/tools.js             # 八个工具定义（Lead）
 src/paths.js             # 路径隔离 + 原子写（B）
 src/capture.js           # 规则抽取候选（B）
 src/frontmatter.js       # frontmatter 解析/序列化/元数据规范化（A）
@@ -43,6 +44,8 @@ test/plugin.test.js      # Lead（集成）
   source: string,        // 'capture' | 'manual' | 'import'
   hash: string,          // 正文内容 hash（16 位十六进制）
   origin: string,        // 可选：来源会话 id；无则 ''
+  delivery: string,      // 'recall' | 'prompt'；缺省 'recall'。写入侧不因 status 降级，
+                         // 「只有 active 进 system prompt」由读侧 src/prompt.js 强制
 }
 ```
 
@@ -79,6 +82,7 @@ confidence: 0.8
 source: capture
 hash: 0123456789abcdef
 origin: ''
+delivery: recall
 ---
 
 正文 Markdown。
@@ -89,6 +93,7 @@ origin: ''
 ```js
 export const ENTRY_KINDS;        // 见 0.1，冻结数组（Object.freeze）
 export const ENTRY_STATUSES;     // 见 0.1
+export const ENTRY_DELIVERIES;   // ['recall', 'prompt']，冻结数组
 export const MAX_BODY_CHARS;     // 20000
 
 // 解析一个完整 Markdown 文档。无 frontmatter 时 meta={}，body=原文。
@@ -101,7 +106,8 @@ export function stringifyDocument(meta, body)  // -> string
 
 // 把任意 meta 规范化为 EntryMeta。缺省值：title 取 body 首行（截 120），kind='fact'，
 // status='active'，created/updated=now().toISOString()，tags=[]，confidence=0.5，
-// source='manual'，hash=hashText(body)，origin=''。非法值回落到默认并记 issues。
+// source='manual'，hash=hashText(body)，origin=''，delivery='recall'。非法值回落到默认并记 issues。
+// delivery 归一化不做 status 联动：pending 条目仍保留 'prompt' 声明意图，安全闸在读侧。
 export function coerceEntry(meta, body, options = {})  // options: { now?: () => Date }
 export function entryToMarkdown(entry)   // -> string（= stringifyDocument(entry.meta, entry.body)）
 
@@ -256,9 +262,34 @@ export function estimateTokens(text)        // -> number：CJK 计 1 token/字�
 export function buildInjectionText(results, options) // -> string | null
 ```
 
+## 6.5 `src/prompt.js`（Lead）—— 指令层
+
+```js
+export const DIRECTIVE_TAG = 'inkvault-directive'
+export const MAX_DIRECTIVE_CHARS = 4000
+
+// 把每对相邻 `{` 打断成 `{ {`；幂等。宿主 interpolate() 用 text.indexOf('{{') 做唯一
+// 扫描锚点，未转义的花括号会让它 throw，异常冒泡到 system-prompt/assemble 直接
+// 打挂整轮请求。`}}` 无需处理。
+export function escapePromptBraces(text)            // -> string
+
+// <inkvault-directive trust="user-declared"> + 三行固定声明句 + 空行 + body + 闭合标签
+export function renderDirectiveBlock(body)          // -> string
+
+// 过滤 meta.status !== 'active' 或 meta.delivery !== 'prompt'；每条渲染成
+// `### ${title} (${id})\n${body}`。无条目 -> null；超 maxChars -> 整块跳过
+// { text: null, count, overflow, maxChars }（**不截断**）；正常 -> { text, count }
+export function buildDirectiveText(entries, options)  // options: { maxChars?: number }
+```
+
+注入点：`index.js` 在 `system-prompt/assemble` 里 **每步都** push 到 `assembly.contexts`
+（名字 `inkvault:directives`）。跳过 push 反而会让宿主多追一份快照——宿主按渲染后整段
+文本是否变化决定是否追加消息。监听器内部异常只 warn，**必须 `return next()`**。
+
 ## 7. 测试要求
 
 - A：frontmatter（往返、坏输入、默认值、hash/id）；search（分词、BM25 排序、空索引、序列化往返）；store（init 建目录、写入→读回、重建索引、删索引后重建、archive、journal、坏文件隔离）。
-- B：paths（`..` 逃逸、绝对路径、UNC、符号链接/junction 逃逸、原子写、safeMove、listMarkdown）；capture（五类规则命中、英文、无命中、去重/限量、优先级）。
+- B：paths（`..` 逃逸、绝对路径、UNC、符号链接/junction 逃逸、原子写、safeMove、listMarkdown）；capture（五类规则命中、英文、无命中、去重/限量、优先级、`delivery` 强声明升级、`directiveTriggers` 自定义替换/空数组关闭/垃圾值回落）。
+- Lead：prompt（花括号转义幂等、边界与声明句、active+prompt 过滤、超限不截断、垃圾 maxChars 回落）；plugin（assemble 每步 push、pending 不进指令层、config 关闭、超限告警、异常不外溢、工具 `delivery` 参数）。
 - 所有测试使用 `node:test` + `node:assert/strict`，不依赖网络。
 - 测试必须能在 Windows 下通过；符号链接用例在无权限创建时 `t.skip()`，但 junction 用例应尝试。

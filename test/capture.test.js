@@ -4,13 +4,15 @@ import assert from 'node:assert/strict';
 import {
   MAX_CANDIDATES_PER_TURN,
   MIN_CONFIDENCE,
+  DEFAULT_DIRECTIVE_TRIGGERS,
   textOfContent,
   extractCandidates,
   detectRememberIntent,
+  isStrongDirective,
   splitSentences,
 } from '../src/capture.js';
 
-const CANDIDATE_KEYS = ['body', 'confidence', 'kind', 'rule', 'status', 'tags', 'title'];
+const CANDIDATE_KEYS = ['body', 'confidence', 'delivery', 'kind', 'rule', 'status', 'tags', 'title'];
 
 /** 抽取单个候选并断言只有一条，返回它。 */
 function onlyCandidate(input) {
@@ -265,4 +267,47 @@ test('纯函数：相同输入产生完全相同结果，不生成 id/时间戳'
     assert.equal('id' in candidate, false);
     assert.equal('created' in candidate, false);
   }
+});
+
+test('强声明短语可自定义：配置项整体替换默认值', () => {
+  // 默认短语命中 -> prompt
+  assert.equal(onlyCandidate({ userText: '记住：以后都用 pnpm。' }).delivery, 'prompt');
+  // 默认短语不命中 -> recall
+  assert.equal(onlyCandidate({ userText: '记住：发布日定在周五。' }).delivery, 'recall');
+
+  // 自定义列表里没有「以后都」，所以默认短语失效
+  assert.equal(
+    onlyCandidate({ userText: '记住：以后都用 pnpm。', directiveTriggers: ['打 tag 才算完成'] }).delivery,
+    'recall',
+  );
+  // 自定义列表命中的短语才升级
+  assert.equal(
+    onlyCandidate({ userText: '记住：打 tag 才算完成。', directiveTriggers: ['打 tag 才算完成'] }).delivery,
+    'prompt',
+  );
+});
+
+test('强声明短语：空数组关闭自动升级，垃圾值回落默认值', () => {
+  const sentence = '记住：以后都用 pnpm。';
+  // 合法空数组 = 关闭自动升级（仍可手动声明 delivery: prompt）
+  assert.equal(onlyCandidate({ userText: sentence, directiveTriggers: [] }).delivery, 'recall');
+  // 非数组 -> 回落默认值
+  assert.equal(onlyCandidate({ userText: sentence, directiveTriggers: '不是数组' }).delivery, 'prompt');
+  // 全是垃圾项 -> 等价于空列表（关闭升级），而不是崩掉
+  assert.equal(onlyCandidate({ userText: sentence, directiveTriggers: [123, null, '  '] }).delivery, 'recall');
+});
+
+test('isStrongDirective：大小写不敏感、按字面匹配、去重去空白', () => {
+  assert.equal(isStrongDirective('记住 From Now On 用 pnpm'), true);
+  assert.equal(isStrongDirective('记住用 pnpm'), false);
+  assert.equal(isStrongDirective(''), false);
+  assert.equal(isStrongDirective(undefined), false);
+  // 短语按字面量匹配，正则元字符不生效（用户填 `.*` 不会变成通配符）
+  assert.equal(isStrongDirective('记住 .* 规则', ['.*']), true);
+  assert.equal(isStrongDirective('记住 abc 规则', ['.*']), false);
+  // 空白与重复项被忽略
+  assert.equal(isStrongDirective('记住 打 tag', ['  ', '打 tag', '打 tag']), true);
+  // 默认值里既有中文也有英文短语
+  assert.ok(DEFAULT_DIRECTIVE_TRIGGERS.includes('以后都'));
+  assert.ok(DEFAULT_DIRECTIVE_TRIGGERS.includes('from now on'));
 });

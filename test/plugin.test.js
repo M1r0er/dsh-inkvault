@@ -279,6 +279,132 @@ test('config validation: no invented default folders, bad values fall back with 
   assert.ok(issues.some((issue) => issue.includes('memoryRoot is unset')))
 })
 
+test('directive lane: an active prompt entry reaches assembly.contexts on every pass', async (t) => {
+  const folders = await temporaryVault(t)
+  const { handlers, tools } = installWith(folders)
+  const exec = { agent: { session: { id: 'directive-session' } } }
+
+  await tools.get('inkvault_remember').execute(
+    { text: '始终用中文回答。', title: '语言约定', delivery: 'prompt' },
+    exec,
+  )
+  await tools.get('inkvault_remember').execute(
+    { text: '项目使用 pnpm。', title: '包管理器' },
+    exec,
+  )
+
+  // Two independent passes: the block must be re-pushed each time, never
+  // skipped, or the Host records a changed snapshot and appends an extra copy.
+  for (let pass = 0; pass < 2; pass += 1) {
+    const assembly = { contexts: [] }
+    let sawNext = false
+    const [result] = await emit(handlers, 'system-prompt/assemble', assembly, {}, async () => {
+      sawNext = true
+      return 'assembled'
+    })
+    assert.equal(sawNext, true, 'the listener must always call next()')
+    assert.equal(result, 'assembled')
+    assert.equal(assembly.contexts.length, 1)
+    assert.equal(assembly.contexts[0].name, 'inkvault:directives')
+    assert.match(assembly.contexts[0].text, /inkvault-directive/)
+    assert.match(assembly.contexts[0].text, /始终用中文回答/)
+    // The recall-lane note stays out of the directive block.
+    assert.doesNotMatch(assembly.contexts[0].text, /pnpm/)
+  }
+})
+
+test('directive lane: pending or recall-only entries never enter the system prompt', async (t) => {
+  const folders = await temporaryVault(t)
+  const { handlers, runtime } = installWith(folders)
+  await runtime.ensureMemoryReady()
+  const session = { id: 'pending-session' }
+
+  // Capture writes status=pending, so even a strong directive stays out.
+  await emitTurn(handlers, session, 1, '记住，以后都用中文回答。')
+  await emit(handlers, 'agent/turn-stopping', { agent: { session }, turn: 1 })
+
+  const assembly = { contexts: [] }
+  await emit(handlers, 'system-prompt/assemble', assembly, {}, async () => 'assembled')
+  assert.equal(assembly.contexts.length, 0, 'a pending directive must not be injected')
+})
+
+test('directive lane: disabled by config and inert without a memory root', async (t) => {
+  const folders = await temporaryVault(t)
+  const exec = { agent: { session: { id: 'off-session' } } }
+
+  const withDirectivesOff = installWith(folders, { directives: false })
+  await withDirectivesOff.tools.get('inkvault_remember').execute(
+    { text: '始终用中文回答。', delivery: 'prompt' },
+    exec,
+  )
+  const offAssembly = { contexts: [] }
+  await emit(withDirectivesOff.handlers, 'system-prompt/assemble', offAssembly, {}, async () => 'ok')
+  assert.equal(offAssembly.contexts.length, 0)
+
+  // No memory root: the listener is still registered but produces nothing.
+  const { ctx } = fakeContext()
+  install(ctx, { disabled: false, memoryRoot: '', knowledgeRoot: folders.knowledgeRoot })
+  const bareAssembly = { contexts: [] }
+  const handlers = new Map()
+  const bare = fakeContext()
+  install(bare.ctx, { disabled: false, memoryRoot: '', knowledgeRoot: folders.knowledgeRoot })
+  await emit(bare.handlers, 'system-prompt/assemble', bareAssembly, {}, async () => 'ok')
+  assert.equal(bareAssembly.contexts.length, 0)
+})
+
+test('directive lane: an oversized block is skipped with a warning, never truncated', async (t) => {
+  const folders = await temporaryVault(t)
+  const warnings = []
+  const { ctx, handlers, tools } = fakeContext()
+  ctx.logger.warn = (message) => warnings.push(String(message))
+  install(ctx, { disabled: false, memoryRoot: folders.memoryRoot, knowledgeRoot: folders.knowledgeRoot, maxDirectiveChars: 200 })
+  const exec = { agent: { session: { id: 'big-session' } } }
+  await tools.get('inkvault_remember').execute(
+    { text: `始终用中文回答。${'补'.repeat(400)}`, delivery: 'prompt' },
+    exec,
+  )
+  const assembly = { contexts: [] }
+  await emit(handlers, 'system-prompt/assemble', assembly, {}, async () => 'ok')
+  assert.equal(assembly.contexts.length, 0, 'oversized directive is refused, not cut')
+  assert.ok(warnings.some((line) => line.includes('maxDirectiveChars')), 'the skip is logged')
+})
+
+test('directive lane: a throwing listener never fails the assemble pass', async (t) => {
+  const folders = await temporaryVault(t)
+  const { ctx, handlers, tools } = fakeContext()
+  install(ctx, { disabled: false, memoryRoot: folders.memoryRoot, knowledgeRoot: folders.knowledgeRoot })
+  const exec = { agent: { session: { id: 'throw-session' } } }
+  await tools.get('inkvault_remember').execute({ text: '规则', delivery: 'prompt' }, exec)
+
+  // Simulate a store failure mid-pass.
+  const runtime = install(ctx, { disabled: false, memoryRoot: folders.memoryRoot, knowledgeRoot: folders.knowledgeRoot })
+  runtime.memoryStore.listEntries = async () => { throw new Error('disk gone') }
+  const assembly = { contexts: [] }
+  const [result] = await emit(handlers, 'system-prompt/assemble', assembly, {}, async () => 'still-assembled')
+  assert.equal(result, 'still-assembled')
+})
+
+test('inkvault_remember accepts delivery and rejects unknown values', async (t) => {
+  const folders = await temporaryVault(t)
+  const { tools, runtime } = installWith(folders)
+  const exec = { agent: { session: { id: 'delivery-session' } } }
+  const definition = tools.get('inkvault_remember')
+  assert.deepEqual(definition.parameters.properties.delivery.enum, ['recall', 'prompt'])
+
+  const saved = await definition.execute({ text: '规则正文', delivery: 'prompt' }, exec)
+  const entry = await runtime.read(saved.id)
+  assert.equal(entry.meta.delivery, 'prompt')
+
+  const fallback = await definition.execute({ text: '普通正文' }, exec)
+  const fallbackEntry = await runtime.read(fallback.id)
+  assert.equal(fallbackEntry.meta.delivery, 'recall')
+
+  await assert.rejects(
+    () => definition.execute({ text: 'x', delivery: 'bogus' }, exec),
+    /delivery must be one of/,
+  )
+})
+
 // The host registry accepts only this JSON Schema subset (`dsh-tools`
 // `assertSupportedJsonSchema`). `required` is an array of property names on the
 // object node; a boolean `required` on a property would reject the whole tool.

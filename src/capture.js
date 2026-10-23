@@ -37,6 +37,76 @@ const EXPLICIT_TRIGGERS = [
   /\bnote\s+that\b/i,
 ];
 
+/**
+ * 「强声明」标记的**默认值**：用户不只是要「记住」，而是要求它**长期生效**。
+ *
+ * 与 {@link EXPLICIT_TRIGGERS} 同时命中才算强声明——单独出现「以后」不构成
+ * 指令，必须叠加在显式的「记住」意图之上。命中的候选投递到指令层
+ * （`delivery: 'prompt'`），其余仍是普通记忆（`delivery: 'recall'`）。
+ *
+ * 这些是**纯文本短语**而不是正则：用户在设置页里直接填「以后都」「from now on」
+ * 就行，不用操心转义；匹配时统一按大小写不敏感的子串比较。
+ * 配置项 `directiveTriggers` 会整体替换本数组；配成空数组即关闭自动升级
+ * （仍可用 frontmatter `delivery: prompt` 或工具参数手动声明）。
+ */
+export const DEFAULT_DIRECTIVE_TRIGGERS = Object.freeze([
+  '以后都',
+  '以后每次',
+  '今后都',
+  '之后都',
+  '永远',
+  '始终要',
+  '必须始终',
+  '都要遵守',
+  '都要按',
+  'from now on',
+  'always do',
+  'never do',
+  'permanent',
+]);
+
+/** 编译后的强声明匹配器缓存：键是短语列表，值是 RegExp[]。 */
+const directiveTriggerCache = new Map();
+
+/** 把一个短语转成正则安全的字面量片段。 */
+function escapeRegExp(text) {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * 把短语列表编译成大小写不敏感的正则数组。
+ * 非数组或全是垃圾值时回落到 {@link DEFAULT_DIRECTIVE_TRIGGERS}；
+ * 合法的空数组表示「不自动升级」，此时返回空数组。
+ * @param {unknown} triggers - configured phrases.
+ * @returns {RegExp[]} compiled matchers.
+ */
+function compileDirectiveTriggers(triggers) {
+  const list = Array.isArray(triggers) ? triggers : DEFAULT_DIRECTIVE_TRIGGERS;
+  const phrases = [];
+  for (const item of list) {
+    if (typeof item !== 'string') continue;
+    const trimmed = item.trim();
+    if (trimmed !== '' && !phrases.includes(trimmed)) phrases.push(trimmed);
+  }
+  const key = phrases.join('\u0000');
+  const cached = directiveTriggerCache.get(key);
+  if (cached !== undefined) return cached;
+  const compiled = phrases.map((phrase) => new RegExp(escapeRegExp(phrase), 'i'));
+  directiveTriggerCache.set(key, compiled);
+  return compiled;
+}
+
+/**
+ * 强声明检测：任一短语以大小写不敏感的子串形式出现即为真。
+ * @param {string} sentence - one candidate sentence.
+ * @param {unknown} [triggers] - configured phrases; omitted uses the defaults.
+ * @returns {boolean} whether the sentence asks for a standing rule.
+ */
+export function isStrongDirective(sentence, triggers) {
+  if (typeof sentence !== 'string' || sentence === '') return false;
+  return compileDirectiveTriggers(triggers).some((re) => re.test(sentence));
+}
+
 /** 偏好类触发词。 */
 const PREFERENCE_RE =
   /我喜欢|我更喜欢|我偏好|我习惯|我通常|我不喜欢|我讨厌|别用|不要用|\bI\s+prefer\b|\bI\s+always\b|\bI\s+never\b|\bI\s+don['’]?t\s+like\b/i;
@@ -66,6 +136,11 @@ const DECLARATIVE_CUES = [
 /**
  * 规则表，顺序即优先级（explicit 最高）。
  * kind 可以是固定值，也可以由命中句内容决定（explicit 依赖偏好词判定 preference/fact）。
+ *
+ * `delivery` 决定候选落到哪一层：`recall`（普通记忆，命中才注入）或
+ * `prompt`（指令层，每次请求常驻）。只有 explicit 规则可能产出 prompt，
+ * 且必须**同时**命中强声明短语（见 {@link isStrongDirective}）——「记住」只是
+ * 要求沉淀，「记住，以后都…」才是要求长期生效。
  */
 const RULES = [
   {
@@ -73,6 +148,7 @@ const RULES = [
     confidence: 0.95,
     test: (sentence) => EXPLICIT_TRIGGERS.some((re) => re.test(sentence)),
     kind: (sentence) => (PREFERENCE_RE.test(sentence) ? 'preference' : 'fact'),
+    delivery: (sentence, triggers) => (isStrongDirective(sentence, triggers) ? 'prompt' : 'recall'),
   },
   {
     rule: 'preference',
@@ -167,11 +243,12 @@ function normalizeCandidateCap(value) {
 /**
  * 从一轮用户文本中抽取记忆候选。
  *
- * input: { userText, assistantText?, turn?, now?, maxCandidates?, minConfidence? }
+ * input: { userText, assistantText?, turn?, now?, maxCandidates?, minConfidence?, directiveTriggers? }
  *   assistantText / turn / now 仅为接口一致性保留：助手文本不参与抽取，本函数不读时钟、不生成 id。
+ *   directiveTriggers 覆盖强声明短语列表（来自配置 `directiveTriggers`）；省略则用默认值。
  *
  * -> Candidate[]，按 confidence 降序，最多 maxCandidates 条。
- *    Candidate: { kind, status, confidence, title, body, tags, rule }
+ *    Candidate: { kind, status, confidence, title, body, tags, rule, delivery }
  */
 export function extractCandidates(input) {
   if (!input || typeof input !== 'object') return [];
@@ -186,6 +263,8 @@ export function extractCandidates(input) {
     typeof input.minConfidence === 'number' && Number.isFinite(input.minConfidence)
       ? input.minConfidence
       : MIN_CONFIDENCE;
+
+  const triggers = input.directiveTriggers;
 
   const seenBodies = new Set();
   const candidates = [];
@@ -212,6 +291,7 @@ export function extractCandidates(input) {
       body,
       tags: [...new Set([kind, matched.rule])], // 含 kind 与规则名，去重
       rule: matched.rule,
+      delivery: typeof matched.delivery === 'function' ? matched.delivery(body, triggers) : 'recall',
     });
   }
 

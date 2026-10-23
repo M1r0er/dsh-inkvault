@@ -1,6 +1,6 @@
 {
   "name": "dsh-inkvault",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "description": "Local Markdown/Obsidian memory vault for DeepSeek Harness: path-isolated auto recall and capture.",
   "type": "module",
   "main": "index.js",

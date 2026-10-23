@@ -8,6 +8,7 @@
  * @module dsh-inkvault/config-schema
  */
 import z from '@deepseek-ai/schemastery'
+import { DEFAULT_DIRECTIVE_TRIGGERS } from './capture.js'
 
 /** Editable plugin configuration; descriptions are shown in the settings form. */
 export const Config = z.object({
@@ -30,6 +31,12 @@ export const Config = z.object({
     .description('每回合最多沉淀的记忆候选数。'),
   minCaptureConfidence: z.number().default(0.6)
     .description('低于该置信度的候选会被丢弃（0-1）。'),
+  directives: z.boolean().default(true)
+    .description('指令层开关：把 `delivery: prompt` 且 status=active 的记忆条目每轮注入系统提示词。'),
+  maxDirectiveChars: z.number().default(4000)
+    .description('指令层文本的字符上限；超出则整块跳过并告警，不截断。'),
+  directiveTriggers: z.array(z.string()).default([...DEFAULT_DIRECTIVE_TRIGGERS])
+    .description('「强声明」短语列表：一句话同时命中「记住」和这里任一短语时，才自动升级为指令层。纯文本子串匹配、大小写不敏感；留空数组即关闭自动升级（仍可手动写 delivery: prompt）。'),
 
   knowledgeEnabled: z.boolean().default(true)
     .description('知识库功能开关：在对话中把知识写进 Obsidian。'),
