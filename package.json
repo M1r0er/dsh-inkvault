@@ -1,7 +1,7 @@
 {
   "name": "dsh-inkvault",
-  "version": "0.4.0",
-  "description": "Local Markdown/Obsidian memory vault for DeepSeek Harness: path-isolated auto recall and capture.",
+  "version": "0.5.0",
+  "description": "Obsidian knowledge-base bridge for DeepSeek Harness: path-isolated notes with wikilinks, tags, folders and backlinks.",
   "type": "module",
   "main": "index.js",
   "exports": {
@@ -21,7 +21,7 @@
   ],
   "engines": {
     "node": ">=20",
-    "dsh": ">=0.2.1-rc.2 <0.2.2"
+    "dsh": ">=0.2.1-rc.2 <0.2.4"
   },
   "dsh": {
     "bundle": {
@@ -57,7 +57,7 @@
     "dsh",
     "deepseek-harness",
     "obsidian",
-    "memory",
+    "knowledge-base",
     "markdown",
     "plugin"
   ]

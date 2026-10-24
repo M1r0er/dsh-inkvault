@@ -15,8 +15,8 @@ export const Config = z.object({
   disabled: z.boolean().default(true)
     .description('总开关：true 时不注册任何工具与钩子，插件行为回到原状。'),
 
-  memoryEnabled: z.boolean().default(true)
-    .description('记忆库功能开关：DSH 的长期记忆。'),
+  memoryEnabled: z.boolean().default(false)
+    .description('降级模式：灵枢记忆不可用时的备用记忆面，默认关闭。'),
   memoryRoot: z.string().default('')
     .description('记忆库文件夹（必填才启用）。建议指向 Obsidian 库内的子目录，例如 ~/Documents/Obsidian Vault/InkVault。'),
   inject: z.boolean().default(true)
@@ -42,6 +42,8 @@ export const Config = z.object({
     .description('知识库功能开关：在对话中把知识写进 Obsidian。'),
   knowledgeRoot: z.string().default('')
     .description('知识库文件夹（必填才启用）。建议指向 Obsidian 库内的子目录，例如 ~/Documents/Obsidian Vault/Knowledge。'),
+  knowledgeHint: z.boolean().default(true)
+    .description('向模型注入一条极短的知识库能力提示，让它在用户说存/记/整理时想到调用；关闭可省约 60 tok/轮。'),
 
   debug: z.boolean().default(false)
     .description('输出召回/沉淀调试日志。'),

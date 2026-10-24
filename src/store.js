@@ -21,16 +21,22 @@ import {
 import {
   MAX_BODY_CHARS,
   ENTRY_ID_PATTERN,
+  MAX_LINKS,
+  MAX_TAGS,
   coerceEntry,
   entryToMarkdown,
+  extractLinks,
+  extractTags,
   hashText,
   makeEntryId,
   parseDocument,
 } from './frontmatter.js'
-import { buildIndex, serializeIndex, deserializeIndex, searchIndex } from './search.js'
+import { buildIndex, serializeIndex, deserializeIndex, searchIndex, tokenize } from './search.js'
 
-/** Directory holding every entry Markdown file. */
+/** Directory holding every entry Markdown file in a memory vault. */
 const MEMORY_DIR = 'memory'
+/** Directory holding every entry Markdown file in a knowledge vault. */
+const NOTES_DIR = 'notes'
 
 /** Reject anything that is not one plain folder name; fall back to `memory`. */
 function normalizeContentDir(value) {
@@ -56,6 +62,27 @@ const INDEX_VERSION = 1
 const DEFAULT_SEARCH_STATUSES = Object.freeze(['active', 'pending'])
 /** Default number of search results. */
 const DEFAULT_SEARCH_LIMIT = 8
+
+/**
+ * Deterministic id for a hand-written note that carries no canonical id.
+ *
+ * `makeEntryId` embeds the clock, which is right for a new capture but wrong
+ * here: the knowledge vault is a folder the user edits directly, so the same
+ * file must resolve to the same id on every rebuild. The id is derived from the
+ * file's vault-relative path only, which keeps it stable across body edits and
+ * unique per file.
+ * @param {string} relative - normalized vault-relative path.
+ * @returns {string} canonical entry id.
+ */
+function adoptedId(relative) {
+  const digest = hashText(`adopt\u0000${normalizeRelative(relative)}`)
+  const stem = String(path.basename(relative, '.md'))
+  // Obsidian daily notes are named `2026-10-24` or `20261024`; accept both so an
+  // adopted note sorts with its real date instead of the epoch marker.
+  const date = stem.match(/(?:^|\D)(\d{4})[-_.]?(\d{2})[-_.]?(\d{2})(?:\D|$)/)
+  const day = date === null ? '19700101' : `${date[1]}${date[2]}${date[3]}`
+  return `m-${day}-${digest.slice(0, 6)}`
+}
 
 /**
  * Normalize a relative path to forward slashes (the EntryRecord.path form).
@@ -90,9 +117,17 @@ function describeError(error) {
  * @param {{ meta: object, body: string }} entry - entry record.
  * @returns {string} searchable text.
  */
+/** How many times a title repeats in the indexed text (title-term weighting). */
+const TITLE_WEIGHT = 3
+
 function searchableText(entry) {
   const tags = Array.isArray(entry.meta.tags) ? entry.meta.tags.join(' ') : ''
-  return [entry.meta.title, tags, entry.body].filter((part) => typeof part === 'string' && part !== '').join('\n')
+  const title = typeof entry.meta.title === 'string' ? entry.meta.title : ''
+  // A note's title is the strongest signal of what it is about, so it is
+  // repeated in the indexed text. BM25's length normalization partly absorbs
+  // the extra length, keeping short titles from dominating the whole corpus.
+  const repeated = title === '' ? [] : new Array(TITLE_WEIGHT).fill(title)
+  return [...repeated, tags, entry.body].filter((part) => typeof part === 'string' && part !== '').join('\n')
 }
 
 /**
@@ -119,17 +154,61 @@ function compareIds(a, b) {
 }
 
 /**
+ * Merge two string lists case-insensitively, keeping the first occurrence.
+ * @param {unknown} base - primary list (frontmatter values).
+ * @param {unknown} extra - secondary list (body-derived values).
+ * @param {number} cap - maximum merged length.
+ * @returns {string[]} merged list.
+ */
+function mergeLists(base, extra, cap) {
+  const merged = []
+  const seen = new Set()
+  for (const source of [base, extra]) {
+    if (!Array.isArray(source)) continue
+    for (const item of source) {
+      if (typeof item !== 'string') continue
+      const value = item.trim()
+      if (value === '') continue
+      const key = value.toLowerCase()
+      if (seen.has(key)) continue
+      if (merged.length >= cap) return merged
+      seen.add(key)
+      merged.push(value)
+    }
+  }
+  return merged
+}
+
+/**
+ * The subfolder of one entry path, relative to the content directory.
+ * @param {string} relativePath - entry path.
+ * @param {string} contentDir - content directory name.
+ * @returns {string} folder ('' means directly under the content directory).
+ */
+function folderOfPath(relativePath, contentDir) {
+  const relative = normalizeRelative(relativePath)
+  const prefix = `${contentDir}/`
+  const rest = relative.startsWith(prefix) ? relative.slice(prefix.length) : relative
+  const slash = rest.lastIndexOf('/')
+  return slash === -1 ? '' : rest.slice(0, slash)
+}
+
+/**
  * One vault backed by a directory. Construction performs no IO; call
  * {@link VaultStore#init} before using it (other methods do so lazily).
  */
 export class VaultStore {
   /**
-   * @param {{ root: string, contentDir?: string, now?: () => Date, clock?: () => number }} options - vault options.
+   * @param {{ root: string, contentDir?: string, profile?: string, now?: () => Date, clock?: () => number }} options - vault options.
    */
-  constructor({ root, contentDir = MEMORY_DIR, now = () => new Date(), clock = () => Date.now() } = {}) {
+  constructor({ root, contentDir, profile = 'memory', now = () => new Date(), clock = () => Date.now() } = {}) {
     if (typeof root !== 'string' || root.trim() === '') throw new TypeError('VaultStore requires a root directory')
     this._root = path.resolve(root)
-    this._contentDir = normalizeContentDir(contentDir)
+    this._profile = profile === 'knowledge' ? 'knowledge' : 'memory'
+    // The profile decides the default content folder: a knowledge vault keeps
+    // notes in `notes/`, a memory vault in `memory/`. Callers may still pass an
+    // explicit contentDir, which wins.
+    this._contentDir = normalizeContentDir(contentDir ?? (this._profile === 'knowledge' ? NOTES_DIR : MEMORY_DIR))
     this._now = typeof now === 'function' ? now : () => new Date()
     this._clock = typeof clock === 'function' ? clock : () => Date.now()
     /** @type {Map<string, { meta: object, body: string, path: string, mtimeMs: number }>} */
@@ -149,6 +228,11 @@ export class VaultStore {
     return this._contentDir
   }
 
+  /** Metadata profile this vault uses (`memory` or `knowledge`). */
+  get profile() {
+    return this._profile
+  }
+
   /**
    * Create the vault layout and load or rebuild the index.
    * @returns {Promise<this>} this store.
@@ -158,18 +242,41 @@ export class VaultStore {
     await this._ensureLayout()
     const loaded = await this._loadIndex()
     if (loaded !== null) {
-      this._entries = loaded.entries
-      this._search = loaded.search
-      this._initialized = true
-      return this
+      if (!loaded.stale) {
+        this._entries = loaded.entries
+        this._search = loaded.search
+        this._initialized = true
+        return this
+      }
+      // The cached index is structurally valid but at least one note changed
+      // since it was written. Re-read just those notes instead of the whole
+      // vault; anything the refresh cannot vouch for falls back to a rebuild.
+      const refreshed = await this._refreshEntries(loaded.entries, loaded.files)
+      if (refreshed !== null) {
+        this._entries = refreshed.entries
+        this._search = this._buildSearch()
+        await this._saveIndex()
+        if (refreshed.changed > 0) {
+          await this.journalRecord({
+            ts: this._clock(),
+            op: 'rebuild',
+            detail: `incremental=${refreshed.changed}`,
+          })
+        }
+        this._initialized = true
+        return this
+      }
     }
     await this.rebuildIndex()
     return this
   }
-
   /**
-   * Load the cached index when it is valid and fresh, otherwise return null.
-   * @returns {Promise<{ entries: Map<string, object>, search: object }|null>} loaded state.
+   * Load the cached index when it is structurally valid.
+   *
+   * `stale` reports whether any note file is newer than the index; a stale
+   * index is still usable as a starting point for an incremental refresh, so
+   * it is returned rather than discarded.
+   * @returns {Promise<{ entries: Map<string, object>, search: object, files: Array<string>, stale: boolean }|null>} loaded state.
    */
   async _loadIndex() {
     let raw
@@ -201,6 +308,7 @@ export class VaultStore {
     }
 
     const entries = new Map()
+    let stale = false
     for (const relative of files) {
       const record = byPath.get(relative)
       if (record === undefined) return null
@@ -210,13 +318,20 @@ export class VaultStore {
       } catch {
         return null
       }
-      // Contract staleness rule: any memory file newer than builtAt expires it.
-      if (stat.mtimeMs > raw.builtAt) return null
-      const meta = coerceEntry(record.meta, record.body, { now: this._now })
+      // Any note newer than builtAt makes the cached state stale. The entries
+      // stay usable — the incremental path re-reads exactly the changed files —
+      // so this no longer forces a whole-vault rebuild.
+      if (stat.mtimeMs > raw.builtAt) stale = true
+      const meta = coerceEntry(record.meta, record.body, { now: this._now, profile: this._profile })
       if (meta.id !== record.meta.id || entries.has(meta.id)) return null
-      entries.set(meta.id, { meta, body: record.body, path: relative, mtimeMs: stat.mtimeMs })
+      // Keep the mtime the index was built from, not the one just observed:
+      // the incremental refresh compares them to decide what to re-read.
+      const recordedMtime = Number(record.mtimeMs)
+      const mtimeMs = Number.isFinite(recordedMtime) ? recordedMtime : stat.mtimeMs
+      if (mtimeMs !== stat.mtimeMs) stale = true
+      entries.set(meta.id, { meta, body: record.body, path: relative, mtimeMs })
     }
-    return { entries, search }
+    return { entries, search, files, stale }
   }
 
   /** Create every directory the vault needs. */
@@ -282,16 +397,55 @@ export class VaultStore {
 
   /**
    * List all entries, newest `updated` first, then by id.
+   * @param {{ folder?: string, tags?: string[] }} [options] - filters.
    * @returns {Promise<Array<{ meta: object, body: string, path: string }>>} entries.
    */
-  async listEntries() {
+  async listEntries(options = {}) {
     await this.ensureIndex()
-    return [...this._entries.values()]
+    const config = options !== null && typeof options === 'object' ? options : {}
+    const folder = typeof config.folder === 'string' ? normalizeRelative(config.folder).replace(/^\/+|\/+$/g, '') : ''
+    const tags = Array.isArray(config.tags) ? config.tags.map((tag) => String(tag).toLowerCase()) : []
+    const matched = []
+    for (const entry of this._entries.values()) {
+      if (folder !== '' && folderOfPath(entry.path, this._contentDir) !== folder) continue
+      if (tags.length > 0) {
+        const own = Array.isArray(entry.meta.tags) ? entry.meta.tags.map((tag) => String(tag).toLowerCase()) : []
+        if (!tags.every((tag) => own.includes(tag))) continue
+      }
+      matched.push(entry)
+    }
+    return matched
       .sort((a, b) => {
         if (a.meta.updated !== b.meta.updated) return a.meta.updated < b.meta.updated ? 1 : -1
         return compareIds(a.meta.id, b.meta.id)
       })
       .map(toEntryRecord)
+  }
+
+  /**
+   * Resolve every entry that links to `id` through its `links` list.
+   *
+   * A link target matches either the entry id or the note title (case
+   * insensitive), which is how Obsidian resolves `[[Note title]]`.
+   * @param {string} id - entry id.
+   * @returns {Promise<Array<{ id: string, title: string }>>} backlinks.
+   */
+  async backlinksOf(id) {
+    await this.ensureIndex()
+    if (typeof id !== 'string') return []
+    const target = this._entries.get(id.trim())
+    if (target === undefined) return []
+    const keys = new Set([String(target.meta.id).toLowerCase(), String(target.meta.title ?? '').toLowerCase()])
+    keys.delete('')
+    const backlinks = []
+    for (const entry of this._entries.values()) {
+      if (entry.meta.id === target.meta.id) continue
+      const links = Array.isArray(entry.meta.links) ? entry.meta.links : []
+      if (!links.some((link) => keys.has(String(link).toLowerCase()))) continue
+      backlinks.push({ id: entry.meta.id, title: entry.meta.title })
+    }
+    backlinks.sort((a, b) => compareIds(a.id, b.id))
+    return backlinks
   }
 
   /**
@@ -311,7 +465,7 @@ export class VaultStore {
   /**
    * Rank entries against a query.
    * @param {string} query - search query.
-   * @param {{ limit?: number, statuses?: string[], kinds?: string[]|null }} [options] - filters.
+   * @param {{ limit?: number, statuses?: string[], kinds?: string[]|null, tags?: string[], folder?: string }} [options] - filters.
    * @returns {Promise<Array<{ entry: { meta: object, body: string, path: string }, score: number }>>} hits.
    */
   async search(query, options = {}) {
@@ -328,16 +482,32 @@ export class VaultStore {
     const kinds = Array.isArray(config.kinds) && config.kinds.length > 0
       ? new Set(config.kinds.map(String))
       : null
+    const tags = Array.isArray(config.tags) ? config.tags.map((tag) => String(tag).toLowerCase()) : []
+    const folder = typeof config.folder === 'string' ? normalizeRelative(config.folder).replace(/^\/+|\/+$/g, '') : ''
 
     if (this._search === null) return []
-    const hits = searchIndex(this._search, query, { limit: Infinity })
+    // An empty query carries no lexical signal. Returning every note would
+    // silently change what `search('')` means, so an unfiltered empty query
+    // stays empty. A caller that supplies a tag/folder slice ("everything
+    // tagged #x") does get the enumeration it asked for.
+    const tokens = tokenize(query)
+    if (tokens.length === 0 && tags.length === 0 && folder === '') return []
+    const hits = tokens.length === 0
+      ? [...this._entries.values()].map((entry) => ({ id: entry.meta.id, score: 0 }))
+      : searchIndex(this._search, query, { limit: Infinity })
     const results = []
     for (const hit of hits) {
       if (results.length >= limit) break
       const entry = this._entries.get(hit.id)
       if (entry === undefined) continue
-      if (!statuses.includes(entry.meta.status)) continue
+      // The knowledge profile has no lifecycle: every note is always live.
+      if (this._profile !== 'knowledge' && !statuses.includes(entry.meta.status)) continue
       if (kinds !== null && !kinds.has(entry.meta.kind)) continue
+      if (folder !== '' && folderOfPath(entry.path, this._contentDir) !== folder) continue
+      if (tags.length > 0) {
+        const own = Array.isArray(entry.meta.tags) ? entry.meta.tags.map((tag) => String(tag).toLowerCase()) : []
+        if (!tags.every((tag) => own.includes(tag))) continue
+      }
       results.push({ entry: toEntryRecord(entry), score: hit.score })
     }
     return results
@@ -392,11 +562,20 @@ export class VaultStore {
     }
 
     const existing = this._entries.get(id)
-    const meta = coerceEntry({ ...rawMeta, id }, body, { now: this._now })
+    const meta = coerceEntry({ ...rawMeta, id }, body, { now: this._now, profile: this._profile })
     meta.id = id
     if (existing !== undefined) meta.created = existing.meta.created
     meta.updated = nowIso
     meta.hash = hashText(body)
+
+    // The knowledge profile derives tags and links from the body itself: an
+    // Obsidian note written by hand is the source of truth, and a `#tag` or a
+    // `[[link]]` typed into the body must survive the write even when the
+    // caller supplied no frontmatter for it.
+    if (this._profile === 'knowledge') {
+      meta.tags = mergeLists(meta.tags, extractTags(body), MAX_TAGS)
+      meta.links = mergeLists(meta.links, extractLinks(body), MAX_LINKS)
+    }
 
     let relative
     if (source.path === undefined || source.path === null) {
@@ -406,7 +585,7 @@ export class VaultStore {
     }
 
     // Write the Markdown first: a failed write must leave the index untouched.
-    const markdown = entryToMarkdown({ meta, body })
+    const markdown = entryToMarkdown({ meta, body }, { profile: this._profile })
     await safeWriteAtomic(this._root, relative, markdown)
     let mtimeMs = this._clock()
     try {
@@ -453,6 +632,100 @@ export class VaultStore {
   }
 
   /**
+   * Read and normalize one entry file.
+   *
+   * Shared by the full rebuild and the incremental refresh so both paths agree
+   * on id derivation, adoption and hashing.
+   * @param {string} relative - content-relative path of the file.
+   * @param {Set<string>} taken - ids already claimed by other files.
+   * @returns {Promise<object>} entry record (`{ meta, body, path, mtimeMs }`).
+   * @throws when the file cannot be read, parsed, or resolved to a unique id.
+   */
+  async _readEntryFile(relative, taken) {
+    const absolute = toAbsolute(this._root, relative)
+    const text = await fs.readFile(absolute, 'utf8')
+    const parsed = parseDocument(text)
+    const stem = path.basename(relative, '.md')
+    const metaId = typeof parsed.meta.id === 'string' ? parsed.meta.id.trim() : ''
+    let id = ''
+    if (ENTRY_ID_PATTERN.test(metaId)) id = metaId
+    else if (ENTRY_ID_PATTERN.test(stem)) id = stem
+    if (id === '') {
+      // The knowledge vault is a folder people edit by hand in Obsidian: a
+      // note that arrives without a canonical id is adopted (id derived from
+      // its path and body) instead of being moved out from under the author.
+      // The memory profile keeps the strict rule — a broken memory file is a
+      // bug worth quarantining.
+      if (this._profile !== 'knowledge') throw new Error(`entry id missing or invalid in ${relative}`)
+      id = adoptedId(relative)
+    }
+    if (taken.has(id)) {
+      if (this._profile !== 'knowledge') throw new Error(`duplicate entry id ${id} in ${relative}`)
+      // A hand-written copy of an existing note: keep the first one and adopt
+      // the rest under a path-derived id rather than deleting the user's file.
+      id = adoptedId(relative)
+      if (taken.has(id)) throw new Error(`duplicate entry id ${id} in ${relative}`)
+    }
+
+    const meta = coerceEntry({ ...parsed.meta, id }, parsed.body, { now: this._now, profile: this._profile })
+    meta.id = id
+    // The body is the source of truth, so the content hash follows it.
+    meta.hash = hashText(parsed.body)
+    const stat = await fs.stat(absolute)
+    return { meta, body: parsed.body, path: relative, mtimeMs: stat.mtimeMs }
+  }
+
+  /**
+   * Re-read only the files whose mtime disagrees with the cached index.
+   *
+   * A full rebuild costs one read per note, which is wasteful when a single
+   * file changed. The incremental path keeps every unchanged entry as-is,
+   * drops the ones whose file vanished, and re-parses only the rest. Anything
+   * that makes the cached state untrustworthy (version skew, a file that now
+   * fails to parse, an unreadable directory) falls back to a full rebuild.
+   * @param {Map<string, object>} cached - entries from the cached index.
+   * @param {Array<string>} files - current content-relative file list.
+   * @returns {Promise<{ entries: Map<string, object>, changed: number }|null>} refreshed state, or null to force a full rebuild.
+   */
+  async _refreshEntries(cached, files) {
+    const present = new Set(files)
+    const byPath = new Map()
+    for (const entry of cached.values()) byPath.set(normalizeRelative(entry.path), entry)
+
+    const entries = new Map()
+    let changed = 0
+    for (const relative of files) {
+      const previous = byPath.get(relative)
+      if (previous !== undefined) {
+        let stat
+        try {
+          stat = await fs.stat(toAbsolute(this._root, relative))
+        } catch {
+          return null
+        }
+        // mtime equality is the whole point: an untouched file is kept verbatim,
+        // so a one-note edit no longer re-reads the entire vault.
+        if (stat.mtimeMs === previous.mtimeMs) {
+          entries.set(previous.meta.id, previous)
+          continue
+        }
+      }
+      try {
+        const entry = await this._readEntryFile(relative, new Set(entries.keys()))
+        entries.set(entry.meta.id, entry)
+        changed += 1
+      } catch {
+        return null
+      }
+    }
+    // A vanished file is a real change even though nothing was re-read.
+    if (present.size !== files.length) return null
+    if (entries.size !== files.length) return null
+    if (changed === 0 && cached.size === entries.size) return { entries, changed: 0 }
+    return { entries, changed }
+  }
+
+  /**
    * Scan `memory/`, quarantine unparseable files, and rebuild the BM25 index.
    * @returns {Promise<{ count: number, quarantined: string[] }>} rebuild summary.
    */
@@ -468,24 +741,9 @@ export class VaultStore {
     const entries = new Map()
     const quarantined = []
     for (const relative of files) {
-      const absolute = toAbsolute(this._root, relative)
       try {
-        const text = await fs.readFile(absolute, 'utf8')
-        const parsed = parseDocument(text)
-        const stem = path.basename(relative, '.md')
-        const metaId = typeof parsed.meta.id === 'string' ? parsed.meta.id.trim() : ''
-        let id = ''
-        if (ENTRY_ID_PATTERN.test(metaId)) id = metaId
-        else if (ENTRY_ID_PATTERN.test(stem)) id = stem
-        if (id === '') throw new Error(`entry id missing or invalid in ${relative}`)
-        if (entries.has(id)) throw new Error(`duplicate entry id ${id} in ${relative}`)
-
-        const meta = coerceEntry({ ...parsed.meta, id }, parsed.body, { now: this._now })
-        meta.id = id
-        // The body is the source of truth, so the content hash follows it.
-        meta.hash = hashText(parsed.body)
-        const stat = await fs.stat(absolute)
-        entries.set(id, { meta, body: parsed.body, path: relative, mtimeMs: stat.mtimeMs })
+        const entry = await this._readEntryFile(relative, new Set(entries.keys()))
+        entries.set(entry.meta.id, entry)
       } catch (error) {
         try {
           const quarantinePath = await this._quarantine(relative)

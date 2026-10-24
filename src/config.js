@@ -23,8 +23,8 @@ import { DEFAULT_DIRECTIVE_TRIGGERS } from './capture.js'
 /** Every supported option and its default value. */
 export const DEFAULTS = Object.freeze({
   disabled: true,
-  // Memory feature (agent long-term memory).
-  memoryEnabled: true,
+  // Memory feature (agent long-term memory) — a fallback lane, off by default in 0.5.0.
+  memoryEnabled: false,
   memoryRoot: '',
   inject: true,
   capture: true,
@@ -39,11 +39,13 @@ export const DEFAULTS = Object.freeze({
   // Knowledge feature (user knowledge written into an Obsidian folder).
   knowledgeEnabled: true,
   knowledgeRoot: '',
+  // Short capability hint injected into the system prompt (≈60 tok/turn).
+  knowledgeHint: true,
   // Diagnostics.
   debug: false,
 })
 
-const BOOLEAN_KEYS = ['disabled', 'memoryEnabled', 'inject', 'capture', 'directives', 'knowledgeEnabled', 'debug']
+const BOOLEAN_KEYS = ['disabled', 'memoryEnabled', 'inject', 'capture', 'directives', 'knowledgeEnabled', 'knowledgeHint', 'debug']
 const NUMBER_KEYS = {
   injectBudgetTokens: { min: 0, max: 20000, integer: true },
   maxRecallItems: { min: 0, max: 50, integer: true },

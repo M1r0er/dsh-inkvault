@@ -2,7 +2,8 @@
  * Model-facing tools: two feature sets plus a status tool.
  *
  * - memory: `inkvault_search` / `read` / `remember` / `forget`
- * - knowledge: `inkvault_note_save` / `note_search` / `note_read`
+ * - knowledge: `inkvault_note_save` / `note_search` / `note_read` / `note_list`
+ *   / `note_update` / `note_forget`
  * - `inkvault_status`: where each configured vault lives and how many notes it holds
  *
  * Definitions are passed to `ctx.tools.register` as plain objects with JSON
@@ -75,6 +76,60 @@ const SAVE_OUTPUT_SCHEMA = objectSchema(
   ['id', 'title', 'status', 'path'],
 )
 
+/** Knowledge read adds the two link directions to the memory read shape. */
+const KNOWLEDGE_READ_OUTPUT_SCHEMA = objectSchema(
+  {
+    id: { type: 'string' },
+    title: { type: 'string' },
+    kind: { type: 'string', enum: KINDS },
+    status: { type: 'string', enum: STATUSES },
+    updated: { type: 'string' },
+    tags: { type: 'array', items: { type: 'string' } },
+    links: { type: 'array', items: { type: 'string' } },
+    backlinks: { type: 'array', items: { type: 'string' } },
+    path: { type: 'string' },
+    body: { type: 'string' },
+  },
+  ['id', 'title', 'kind', 'status', 'updated', 'tags', 'links', 'backlinks', 'path', 'body'],
+)
+
+/** One row of `inkvault_note_list`. */
+const NOTE_SUMMARY_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['id', 'title', 'kind', 'updated', 'tags', 'folder'],
+  properties: {
+    id: { type: 'string' },
+    title: { type: 'string' },
+    kind: { type: 'string', enum: KNOWLEDGE_KINDS },
+    updated: { type: 'string' },
+    tags: { type: 'array', items: { type: 'string' } },
+    folder: { type: 'string' },
+  },
+}
+
+const LIST_OUTPUT_SCHEMA = objectSchema(
+  { notes: { type: 'array', items: NOTE_SUMMARY_SCHEMA }, total: { type: 'integer' } },
+  ['notes', 'total'],
+)
+
+const UPDATE_OUTPUT_SCHEMA = objectSchema(
+  {
+    id: { type: 'string' },
+    title: { type: 'string' },
+    kind: { type: 'string', enum: KNOWLEDGE_KINDS },
+    updated: { type: 'string' },
+    tags: { type: 'array', items: { type: 'string' } },
+    path: { type: 'string' },
+  },
+  ['id', 'title', 'kind', 'updated', 'tags', 'path'],
+)
+
+const FORGET_OUTPUT_SCHEMA = objectSchema(
+  { id: { type: 'string' }, trashPath: { type: 'string' } },
+  ['id', 'trashPath'],
+)
+
 const VAULT_STATUS_SCHEMA = {
   type: 'object',
   additionalProperties: false,
@@ -97,7 +152,7 @@ const STATUS_OUTPUT_SCHEMA = objectSchema(
     memory: VAULT_STATUS_SCHEMA,
     knowledge: VAULT_STATUS_SCHEMA,
   },
-  ['disabled', 'configIssues', 'memory', 'knowledge'],
+  ['disabled', 'configIssues', 'knowledge'],
 )
 
 /** Report an archive result or a missing note. */
@@ -249,7 +304,7 @@ export function memoryToolDefinitions(runtime) {
         + 'so the user can restore it.',
       parameters: objectSchema(
         {
-          id: { type: 'string', description: 'Note id to archive.' },
+          id: { type: 'string', description: 'Note id.' },
           reason: { type: 'string', description: 'Optional short reason recorded in the vault journal.' },
         },
         ['id'],
@@ -274,20 +329,34 @@ export function memoryToolDefinitions(runtime) {
   ]
 }
 
-/** The three knowledge-vault tools. */
+/** Normalize a model-supplied tag list: strings only, trimmed, lowercased, deduped. */
+function tagList(value) {
+  if (!Array.isArray(value)) return []
+  const tags = []
+  for (const item of value) {
+    if (typeof item !== 'string') continue
+    const tag = item.trim().toLowerCase()
+    if (tag === '' || tags.includes(tag)) continue
+    tags.push(tag)
+  }
+  return tags
+}
+
+/** The six knowledge-vault tools: save, search, read, list, update, forget. */
 export function knowledgeToolDefinitions(runtime) {
   return [
     {
       name: 'inkvault_note_save',
       description:
-        'Save a knowledge note into the user\'s chosen Obsidian knowledge folder. Use it when the user says to store, '
-        + 'keep, or organize something they explained (a concept, how-to, decision, or reference). It only writes inside the configured folder.',
+        'Save one knowledge note into the Obsidian knowledge folder. Use it when the user says to store, keep, '
+        + 'or organize something they explained (a concept, how-to, decision, or reference).',
       parameters: objectSchema(
         {
-          text: { type: 'string', description: 'Note body in Markdown: the knowledge to keep.' },
-          title: { type: 'string', description: 'Short note title; defaults to the first line of text.' },
-          kind: { type: 'string', enum: KNOWLEDGE_KINDS, description: 'Note kind; defaults to reference.' },
-          tags: { type: 'array', items: { type: 'string' }, description: 'Optional lowercase tags.' },
+          text: { type: 'string', description: 'Markdown body.' },
+          title: { type: 'string', description: 'Short title.' },
+          kind: { type: 'string', enum: KNOWLEDGE_KINDS, description: 'Defaults to reference.' },
+          tags: { type: 'array', items: { type: 'string' }, description: 'Tags.' },
+          folder: { type: 'string', description: 'Subfolder under notes/.' },
         },
         ['text'],
       ),
@@ -304,7 +373,8 @@ export function knowledgeToolDefinitions(runtime) {
           body,
           kind,
           title: args.title,
-          tags: Array.isArray(args.tags) ? args.tags : [],
+          tags: tagList(args.tags),
+          folder: args.folder,
           origin: exec?.agent?.session?.id ?? '',
           now: runtime.now(),
         })
@@ -317,7 +387,9 @@ export function knowledgeToolDefinitions(runtime) {
       parameters: objectSchema(
         {
           query: { type: 'string', description: 'Keywords or a short question.' },
-          limit: { type: 'integer', description: 'Maximum number of results, 1-20. Defaults to 8.' },
+          limit: { type: 'integer', description: 'Max results, 1-20.' },
+          kinds: { type: 'array', items: { type: 'string', enum: KNOWLEDGE_KINDS }, description: 'Only these kinds.' },
+          tags: { type: 'array', items: { type: 'string' }, description: 'Must carry all.' },
         },
         ['query'],
       ),
@@ -332,7 +404,12 @@ export function knowledgeToolDefinitions(runtime) {
       async execute(args) {
         const limit = args.limit ?? 8
         if (!Number.isInteger(limit) || limit < 1 || limit > 20) throw new Error('limit must be an integer between 1 and 20')
-        const hits = await runtime.noteSearch(String(args.query ?? ''), { limit })
+        const tags = tagList(args.tags)
+        const hits = await runtime.noteSearch(String(args.query ?? ''), {
+          limit,
+          kinds: Array.isArray(args.kinds) && args.kinds.length > 0 ? args.kinds : null,
+          tags: tags.length > 0 ? tags : null,
+        })
         return {
           results: hits.map((hit) => ({
             id: hit.entry.meta.id,
@@ -347,15 +424,16 @@ export function knowledgeToolDefinitions(runtime) {
     },
     {
       name: 'inkvault_note_read',
-      description: 'Read one full knowledge note from the configured folder by its id.',
+      description: 'Read one full knowledge note by id, with its outgoing links and backlinks.',
       parameters: objectSchema(
-        { id: { type: 'string', description: 'Note id as returned by inkvault_note_save or inkvault_note_search.' } },
+        { id: { type: 'string', description: 'Note id from search or list.' } },
         ['id'],
       ),
       output: {
-        schema: READ_OUTPUT_SCHEMA,
+        schema: KNOWLEDGE_READ_OUTPUT_SCHEMA,
         render: (_args, value) => text(`${value.id} · ${value.title}\nkind: ${value.kind} · updated: ${value.updated}\n`
-          + `tags: ${value.tags.join(', ') || '(none)'} · path: ${value.path}\n\n${value.body}`),
+          + `tags: ${value.tags.join(', ') || '(none)'} · path: ${value.path}\n`
+          + `links: ${value.links.join(', ') || '(none)'} · backlinks: ${value.backlinks.join(', ') || '(none)'}\n\n${value.body}`),
       },
       async execute(args) {
         const record = await runtime.noteRead(String(args.id ?? ''))
@@ -367,9 +445,112 @@ export function knowledgeToolDefinitions(runtime) {
           status: record.meta.status,
           updated: record.meta.updated,
           tags: record.meta.tags,
+          links: record.links,
+          backlinks: record.backlinks,
           path: record.path,
           body: record.body,
         }
+      },
+    },
+    {
+      name: 'inkvault_note_list',
+      description:
+        'List the knowledge notes in the configured folder, so notes written earlier can be found again. '
+        + 'Filter by folder or tags, or set recent for newest-first order.',
+      parameters: objectSchema(
+        {
+          folder: { type: 'string', description: 'Only this subfolder.' },
+          tags: { type: 'array', items: { type: 'string' }, description: 'Must carry all.' },
+          recent: { type: 'boolean', description: 'Newest first.' },
+          limit: { type: 'integer', description: 'Max notes, 1-50.' },
+        },
+        [],
+      ),
+      output: {
+        schema: LIST_OUTPUT_SCHEMA,
+        render: (_args, value) => {
+          if (value.notes.length === 0) return text('No knowledge notes matched.')
+          const lines = value.notes.map((note) => `${note.id} [${note.kind}] ${note.folder === '' ? '(root)' : note.folder} — ${note.title} · ${note.updated}`)
+          return text(`Listed ${value.notes.length} of ${value.total} knowledge note(s):\n${lines.join('\n')}`)
+        },
+      },
+      async execute(args) {
+        const limit = args.limit ?? 20
+        if (!Number.isInteger(limit) || limit < 1 || limit > 50) throw new Error('limit must be an integer between 1 and 50')
+        return runtime.noteList({
+          folder: args.folder === undefined ? null : String(args.folder),
+          tags: tagList(args.tags),
+          recent: args.recent === true,
+          limit,
+        })
+      },
+    },
+    {
+      name: 'inkvault_note_update',
+      description:
+        'Update one existing knowledge note by id: replace its title, body or tags. Omitted fields keep their '
+        + 'current value, created stays, updated is refreshed.',
+      parameters: objectSchema(
+        {
+          id: { type: 'string', description: 'Note id.' },
+          title: { type: 'string', description: 'New title.' },
+          text: { type: 'string', description: 'New body; omit to keep.' },
+          tags: { type: 'array', items: { type: 'string' }, description: 'New tags.' },
+        },
+        ['id'],
+      ),
+      output: {
+        schema: UPDATE_OUTPUT_SCHEMA,
+        render: (_args, value) => text(`Updated ${value.id} at ${value.path}: ${value.title} (updated ${value.updated})`),
+      },
+      async execute(args) {
+        const id = String(args.id ?? '').trim()
+        if (id === '') throw new Error('id must not be empty')
+        const patch = { id }
+        if (args.title !== undefined) {
+          const title = String(args.title).trim()
+          if (title === '') throw new Error('title must not be empty')
+          patch.title = title
+        }
+        if (args.text !== undefined) {
+          const body = String(args.text).trim()
+          if (body === '') throw new Error('text must not be empty')
+          patch.body = body
+        }
+        if (args.tags !== undefined) patch.tags = tagList(args.tags)
+        const record = await runtime.noteUpdate(patch)
+        if (record === undefined) throw new Error(`knowledge note not found: ${id}`)
+        return {
+          id: record.meta.id,
+          title: record.meta.title,
+          kind: record.meta.kind,
+          updated: record.meta.updated,
+          tags: record.meta.tags,
+          path: record.path,
+        }
+      },
+    },
+    {
+      name: 'inkvault_note_forget',
+      description:
+        'Archive one knowledge note by id. The file moves to the vault\'s .trash directory instead of being deleted, '
+        + 'so the user can restore it.',
+      parameters: objectSchema(
+        {
+          id: { type: 'string', description: 'Note id to archive.' },
+          reason: { type: 'string', description: 'Optional reason.' },
+        },
+        ['id'],
+      ),
+      output: {
+        schema: FORGET_OUTPUT_SCHEMA,
+        render: (_args, value) => text(`Archived ${value.id}. The file is preserved at ${value.trashPath} and can be restored.`),
+      },
+      async execute(args) {
+        const id = String(args.id ?? '').trim()
+        const result = await runtime.noteForget(id, String(args.reason ?? ''))
+        if (result === undefined) throw new Error(`knowledge note not found: ${id}`)
+        return { id: result.id, trashPath: result.trashPath }
       },
     },
   ]
@@ -380,19 +561,18 @@ export function statusToolDefinition(runtime) {
   return {
     name: 'inkvault_status',
     description:
-      'Report where the configured Ink Vault folders are (memory vault and knowledge folder), whether each feature is '
-      + 'active, and how many notes each holds. Use it when the user asks where their notes went or how Ink Vault is configured.',
+      'Report where the Ink Vault knowledge folder is, whether the feature is active, and how many notes it holds. '
+      + 'Use it when the user asks where their notes went or how Ink Vault is configured.',
     parameters: { type: 'object', additionalProperties: false, properties: {}, required: [] },
     output: {
       schema: STATUS_OUTPUT_SCHEMA,
       render: (_args, value) => {
-        const lines = [
-          `Ink Vault status (disabled=${value.disabled})`,
-          vaultLine('memory', value.memory),
-          vaultLine('knowledge', value.knowledge),
-        ]
-        if (!value.memory.configured || !value.knowledge.configured) {
-          lines.push('Configure memoryRoot / knowledgeRoot in the profile cordis.patch.yml (choose folders inside your Obsidian vault).')
+        const lines = [`Ink Vault status (disabled=${value.disabled})`]
+        // The memory lane is a degraded mode; it only appears while it is active.
+        if (value.memory !== undefined) lines.push(vaultLine('memory', value.memory))
+        lines.push(vaultLine('knowledge', value.knowledge))
+        if (value.knowledge.configured === false) {
+          lines.push('Configure knowledgeRoot in the profile cordis.patch.yml (choose a folder inside your Obsidian vault).')
         }
         if (value.configIssues.length > 0) lines.push(`config issues: ${value.configIssues.join('; ')}`)
         return text(lines.join('\n'))

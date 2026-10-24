@@ -6,3 +6,4 @@ Thumbs.db
 dist/
 coverage/
 .diag/
+.agent-teams/

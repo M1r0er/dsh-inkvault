@@ -39,6 +39,41 @@ const ENTRY_KEY_ORDER = Object.freeze([
   'id', 'title', 'kind', 'status', 'created', 'updated', 'tags', 'confidence', 'source', 'hash', 'origin', 'delivery',
 ])
 
+/**
+ * Knowledge-profile frontmatter key order (0.5.0 field de-noising).
+ *
+ * The knowledge vault never stores lifecycle or delivery intent, so
+ * `status`, `confidence`, `origin` and `delivery` are not generated there.
+ */
+export const KNOWLEDGE_KEY_ORDER = Object.freeze([
+  'id', 'title', 'kind', 'created', 'updated', 'tags', 'links', 'source', 'hash',
+])
+
+/** Hard cap on links stored on one entry. */
+export const MAX_LINKS = 64
+
+/** Hard cap on the length of one link target (characters). */
+export const MAX_LINK_CHARS = 200
+
+/** Hard cap on tags stored on one entry. */
+export const MAX_TAGS = 12
+
+/** Hard cap on tags merged in from the body on the write path. */
+const MAX_BODY_TAGS = 12
+
+/** Hard cap on the length of one `#tag` token. */
+const MAX_TAG_CHARS = 100
+
+/**
+ * Body tag pattern: `#` followed by CJK/letters/digits/`-_/`, where the
+ * preceding character is neither alphanumeric nor another `#` (so URLs such as
+ * `https://x/y#frag` and headings such as `##heading` do not produce tags).
+ */
+const BODY_TAG_RE = /(?<![\p{L}\p{N}#])#([\p{L}\p{N}_\-\/]+)/gu
+
+/** Body wiki-link pattern: a matched pair of double brackets with no nesting. */
+const BODY_LINK_RE = /\[\[([^\[\]]*)\]\]/g
+
 /** Values YAML (and this subset) treat as null; `window` is kept for compatibility with v0.1. */
 const NULL_LITERALS = new Set(['null', '~', 'window'])
 
@@ -254,21 +289,24 @@ function formatScalaritem(item) {
  * appended (in insertion order) so parsing never silently drops data.
  * @param {object} meta - metadata object.
  * @param {string} body - Markdown body.
+ * @param {{ profile?: string }} [options] - serialization profile.
  * @returns {string} serialized document.
  */
-export function stringifyDocument(meta, body) {
+export function stringifyDocument(meta, body, options = {}) {
   const source = meta !== null && typeof meta === 'object' && !Array.isArray(meta) ? meta : {}
+  const profile = options.profile === 'knowledge' ? 'knowledge' : 'memory'
+  const order = profile === 'knowledge' ? KNOWLEDGE_KEY_ORDER : ENTRY_KEY_ORDER
   const lines = ['---']
-  for (const key of ENTRY_KEY_ORDER) {
-    if (key === 'tags') {
-      const tags = Array.isArray(source.tags) ? source.tags.map(String) : []
-      lines.push(`tags: [${tags.map((tag) => formatScalaritem(tag)).join(', ')}]`)
+  for (const key of order) {
+    if (key === 'tags' || key === 'links') {
+      const items = Array.isArray(source[key]) ? source[key].map(String) : []
+      lines.push(`${key}: [${items.map((item) => formatScalaritem(item)).join(', ')}]`)
       continue
     }
     lines.push(`${key}: ${formatScalar(source[key])}`)
   }
   for (const key of Object.keys(source)) {
-    if (ENTRY_KEY_ORDER.includes(key)) continue
+    if (order.includes(key)) continue
     if (source[key] === undefined) continue
     lines.push(`${key}: ${formatScalar(source[key])}`)
   }
@@ -372,7 +410,101 @@ function coerceTags(value) {
     if (tag === '' || seen.has(tag)) continue
     seen.add(tag)
     tags.push(tag)
-    if (tags.length >= 12) break
+    if (tags.length >= MAX_TAGS) break
+  }
+  return tags
+}
+
+/**
+ * Normalize a raw `links` value into the EntryMeta link list.
+ *
+ * Every invalid item is dropped (never thrown) and reported through `report`,
+ * because a hand-edited note must stay readable even when one link is broken.
+ * @param {unknown} value - raw links value.
+ * @param {(message: string) => void} report - issue sink.
+ * @returns {string[]} normalized link targets.
+ */
+function coerceLinks(value, report) {
+  if (value === undefined || value === null) return []
+  let items
+  if (Array.isArray(value)) items = value
+  else if (typeof value === 'string') items = [value]
+  else {
+    report(`invalid links "${String(value)}"; using an empty list`)
+    return []
+  }
+  const seen = new Set()
+  const links = []
+  for (const item of items) {
+    if (item === null || item === undefined) continue
+    const target = collapse(item)
+    if (target === '') {
+      report('empty link target dropped')
+      continue
+    }
+    if (target.length > MAX_LINK_CHARS) {
+      report(`link target longer than ${MAX_LINK_CHARS} characters dropped: ${target.slice(0, 40)}…`)
+      continue
+    }
+    const key = target.toLowerCase()
+    if (seen.has(key)) continue
+    if (links.length >= MAX_LINKS) {
+      report(`more than ${MAX_LINKS} links; extra targets dropped`)
+      break
+    }
+    seen.add(key)
+    links.push(target)
+  }
+  return links
+}
+
+/**
+ * Extract Obsidian wiki-link targets from a Markdown body.
+ *
+ * Only matched `[[…]]` pairs are considered. An optional alias (`|text`) and
+ * heading anchor (`#heading`) are stripped so the target is the note itself,
+ * which is what backlink resolution needs.
+ * @param {string} body - Markdown body.
+ * @returns {string[]} link targets, in document order, deduplicated.
+ */
+export function extractLinks(body) {
+  if (typeof body !== 'string' || body === '') return []
+  const links = []
+  const seen = new Set()
+  for (const match of body.matchAll(BODY_LINK_RE)) {
+    const raw = match[1]
+    const cut = raw.split('|')[0].split('#')[0]
+    const target = collapse(cut)
+    if (target === '' || target.length > MAX_LINK_CHARS) continue
+    const key = target.toLowerCase()
+    if (seen.has(key)) continue
+    seen.add(key)
+    links.push(target)
+    if (links.length >= MAX_LINKS) break
+  }
+  return links
+}
+
+/**
+ * Extract `#tag` tokens from a Markdown body.
+ *
+ * A tag is `#` plus letters, digits, CJK, `-`, `_` or `/`, and the character
+ * before the `#` must not be alphanumeric or another `#` — that keeps URL
+ * fragments (`https://x/y#frag`) and `##headings` out of the tag list.
+ * @param {string} body - Markdown body.
+ * @returns {string[]} lowercase tags, in document order, deduplicated.
+ */
+export function extractTags(body) {
+  if (typeof body !== 'string' || body === '') return []
+  const tags = []
+  const seen = new Set()
+  for (const match of body.matchAll(BODY_TAG_RE)) {
+    const tag = match[1].replace(/\/+$/, '').toLowerCase()
+    if (tag === '' || tag.length > MAX_TAG_CHARS) continue
+    if (seen.has(tag)) continue
+    seen.add(tag)
+    tags.push(tag)
+    if (tags.length >= MAX_BODY_TAGS) break
   }
   return tags
 }
@@ -443,6 +575,8 @@ export function coerceEntry(meta, body, options = {}) {
   }
 
   const tags = coerceTags(raw.tags)
+  const links = coerceLinks(raw.links, report)
+  const profile = options.profile === 'knowledge' ? 'knowledge' : 'memory'
 
   let confidence = 0.5
   if (typeof raw.confidence === 'number' && Number.isFinite(raw.confidence)) {
@@ -475,6 +609,23 @@ export function coerceEntry(meta, body, options = {}) {
     delivery = 'recall'
   }
 
+  // The knowledge profile carries no lifecycle or delivery intent. Values are
+  // still normalized above so a 0.4.0 note with those keys parses cleanly, but
+  // they are not part of the returned shape and never reach the frontmatter.
+  if (profile === 'knowledge') {
+    return {
+      id,
+      title,
+      kind,
+      created: createdDate.toISOString(),
+      updated: updatedDate.toISOString(),
+      tags,
+      links,
+      source,
+      hash,
+    }
+  }
+
   return {
     id,
     title,
@@ -483,6 +634,7 @@ export function coerceEntry(meta, body, options = {}) {
     created: createdDate.toISOString(),
     updated: updatedDate.toISOString(),
     tags,
+    links,
     confidence,
     source,
     hash,
@@ -494,11 +646,12 @@ export function coerceEntry(meta, body, options = {}) {
 /**
  * Serialize an EntryRecord into Markdown (metadata + body).
  * @param {{ meta: object, body: string }} entry - entry record.
+ * @param {{ profile?: string }} [options] - serialization profile.
  * @returns {string} Markdown document.
  */
-export function entryToMarkdown(entry) {
+export function entryToMarkdown(entry, options = {}) {
   const record = entry !== null && typeof entry === 'object' ? entry : {}
-  return stringifyDocument(record.meta, record.body)
+  return stringifyDocument(record.meta, record.body, options)
 }
 
 // Exposed for store.js so it can validate ids without duplicating the regex.

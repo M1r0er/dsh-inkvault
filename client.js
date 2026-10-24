@@ -16,6 +16,7 @@ window.__ModuleLoader__.load({
 
     const FIELD_MEMORY = 'memoryRoot'
     const FIELD_KNOWLEDGE = 'knowledgeRoot'
+    const FIELD_HINT = 'knowledgeHint'
     const FIELD_DIRECTIVES = 'directives'
     const FIELD_TRIGGERS = 'directiveTriggers'
     const FIELD_MAX_CHARS = 'maxDirectiveChars'
@@ -120,6 +121,8 @@ window.__ModuleLoader__.load({
         borderRadius: '6px',
       },
       sectionTitle: { margin: 0, fontSize: '15px', fontWeight: 500, lineHeight: '22px' },
+      advanced: { display: 'flex', flexDirection: 'column', gap: '10px' },
+      summary: { cursor: 'pointer', fontWeight: 500, fontSize: '13px', color: 'var(--dsw-alias-label-secondary)' },
       footer: { display: 'flex', alignItems: 'center', gap: '12px' },
       status: { color: 'var(--dsw-alias-label-secondary)', fontSize: '12px' },
       error: { color: 'var(--dsw-alias-state-error-primary)', fontSize: '12px' },
@@ -134,6 +137,7 @@ window.__ModuleLoader__.load({
         const [snapshot, setSnapshot] = React.useState(undefined)
         const [memoryRoot, setMemoryRoot] = React.useState('')
         const [knowledgeRoot, setKnowledgeRoot] = React.useState('')
+        const [knowledgeHint, setKnowledgeHint] = React.useState(true)
         const [directives, setDirectives] = React.useState(true)
         const [triggers, setTriggers] = React.useState('')
         const [maxChars, setMaxChars] = React.useState('')
@@ -177,6 +181,7 @@ window.__ModuleLoader__.load({
           if (dirty || snapshot?.status !== 'ready' || snapshot?.value === undefined) return
           setMemoryRoot(String(snapshot.value[FIELD_MEMORY] ?? ''))
           setKnowledgeRoot(String(snapshot.value[FIELD_KNOWLEDGE] ?? ''))
+          setKnowledgeHint(snapshot.value[FIELD_HINT] !== false)
           setDirectives(snapshot.value[FIELD_DIRECTIVES] !== false)
           const list = snapshot.value[FIELD_TRIGGERS]
           setTriggers(Array.isArray(list) ? list.join('\n') : '')
@@ -237,8 +242,9 @@ window.__ModuleLoader__.load({
           try {
             const form = configForms.get(namespace)
             const operations = [
-              { op: 'set', path: [FIELD_MEMORY], value: memoryRoot.trim() },
               { op: 'set', path: [FIELD_KNOWLEDGE], value: knowledgeRoot.trim() },
+              { op: 'set', path: [FIELD_HINT], value: knowledgeHint },
+              { op: 'set', path: [FIELD_MEMORY], value: memoryRoot.trim() },
               { op: 'set', path: [FIELD_DIRECTIVES], value: directives },
               { op: 'set', path: [FIELD_TRIGGERS], value: parseTriggers(triggers) },
             ]
@@ -284,14 +290,13 @@ window.__ModuleLoader__.load({
           h('p', { style: styles.hint }, hint)
         )
 
-        return h('div', { style: styles.page },
-          h('h2', { style: styles.title }, SECTION_LABEL),
-          h('p', { style: styles.intro }, '选择知识库与记忆库使用的文件夹，并设置指令层的升级规则。留空表示该功能不启用；插件不会创建任何未配置的目录。'),
-          namespace === undefined && failure === '' ? h('p', { style: styles.hint }, '正在读取墨库配置…') : null,
-          field('记忆库文件夹', memoryRoot, edit(setMemoryRoot), '例如 C:\\\\Users\\\\me\\\\Documents\\\\Obsidian Vault\\\\InkVault（支持 ~）', FIELD_MEMORY),
-          field('知识库文件夹', knowledgeRoot, edit(setKnowledgeRoot), '例如 C:\\\\Users\\\\me\\\\Documents\\\\Obsidian Vault\\\\Knowledge（支持 ~）', FIELD_KNOWLEDGE),
-          h('h3', { style: styles.sectionTitle }, '指令层'),
-          h('p', { style: styles.hint }, '指令层把用户显式声明的长期约定每轮注入系统提示词；其余笔记仍走关键词召回，只作参考数据。'),
+        // Memory lane, directive lane and the triggers are fallback/advanced
+        // settings: 0.5.0 is a knowledge-vault plugin, so the main page shows the
+        // knowledge folder and the capability hint only.
+        const advanced = h('details', { style: styles.advanced },
+          h('summary', { style: styles.summary }, '高级 / 降级模式'),
+          h('p', { style: styles.hint }, '记忆面（灵枢不可用时的备用长期记忆）与指令层默认关闭。'),
+          field('记忆库文件夹（降级模式）', memoryRoot, edit(setMemoryRoot), '例如 C:\\\\Users\\\\me\\\\Documents\\\\Obsidian Vault\\\\InkVault（支持 ~）', FIELD_MEMORY),
           h('div', { style: styles.card },
             h('label', { style: styles.checkboxRow },
               h('input', {
@@ -330,7 +335,28 @@ window.__ModuleLoader__.load({
               onChange: (event) => { setMaxChars(event.target.value); setDirty(true); setNotice('') },
             }),
             h('p', { style: styles.hint }, '超出上限时整块跳过并告警，不会截断——截断的指令比没有指令更危险。')
+          )
+        )
+
+        return h('div', { style: styles.page },
+          h('h2', { style: styles.title }, SECTION_LABEL),
+          h('p', { style: styles.intro }, '选择 Obsidian 知识库文件夹。留空表示知识库不启用；插件不会创建任何未配置的目录。'),
+          namespace === undefined && failure === '' ? h('p', { style: styles.hint }, '正在读取墨库配置…') : null,
+          field('知识库文件夹', knowledgeRoot, edit(setKnowledgeRoot), '例如 C:\\\\Users\\\\me\\\\Documents\\\\Obsidian Vault\\\\Knowledge（支持 ~）', FIELD_KNOWLEDGE),
+          h('div', { style: styles.card },
+            h('label', { style: styles.checkboxRow },
+              h('input', {
+                type: 'checkbox',
+                checked: knowledgeHint,
+                style: styles.checkbox,
+                disabled: !writable,
+                onChange: (event) => { setKnowledgeHint(event.target.checked); setDirty(true); setNotice('') },
+              }),
+              h('span', { style: styles.label }, '启用能力提示')
+            ),
+            h('p', { style: styles.hint }, '每轮向模型注入一条极短提示（约 60 tok），让它在你说「存 / 记住 / 整理」时想到写笔记。关闭可省这部分开销。')
           ),
+          advanced,
           h('div', { style: styles.footer },
             h('button', {
               type: 'button',
@@ -341,7 +367,7 @@ window.__ModuleLoader__.load({
             notice === '' ? null : h('span', { style: styles.status }, notice)
           ),
           failure === '' ? null : h('p', { style: styles.error }, failure),
-          h('p', { style: styles.hint }, '提示：两个文件夹建议都放在同一个 Obsidian 库内，便于在 Obsidian 中直接查看。')
+          h('p', { style: styles.hint }, '提示：知识库建议放在 Obsidian 库内，便于在 Obsidian 中直接查看。')
         )
       }
     }

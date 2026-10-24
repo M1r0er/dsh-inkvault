@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "InkVault",
-    "description": "Local Markdown memory vault: path-isolated recall, capture, and four explicit vault tools."
+    "description": "Obsidian knowledge-base bridge: write notes with wikilinks, tags and folders. Memory mode is off by default."
   }
 }
